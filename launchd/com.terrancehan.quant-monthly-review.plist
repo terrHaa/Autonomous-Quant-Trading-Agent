@@ -3,13 +3,17 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Monthly REVIEW job: aggregates the month's daily-run JSONs AND runs
-  the safety-railed auto-improver. Fires on the 1st of every month at
-  16:30 local time — the agent treats (today - 1 day) as the
-  month-ending date, so this catches the prior month's full activity.
+  the safety-railed auto-improver.
 
-  Why 1st-of-next-month and not "last trading day of this month": launchd
-  can't natively express "last trading day". Running on the 1st gives
-  us the simplest deterministic schedule and the script handles any
+  Mac is on CST (+0800). 06:30 Day-2 CST maps to:
+    - 18:30 Day-1 EDT (summer): 2.5h after the 1st-of-month close.
+    - 17:30 Day-1 EST (winter): 1.5h after close.
+  --for-date "yesterday CST" = Day-1 CST = Day-1 ET, so the improver's
+  backtest window ends on the actual 1st of the month in ET.
+
+  Why Day-1 of next month and not "last trading day of this month":
+  launchd can't natively express "last trading day". Running on the 1st
+  gives us a deterministic schedule and the script handles any
   weekend/holiday by reading cached data.
 -->
 <plist version="1.0">
@@ -21,14 +25,14 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-monthly-review</string>
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-monthly-review --for-date "$(date -v-1d +%Y-%m-%d)"</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Hour</key><integer>16</integer>
+        <key>Hour</key><integer>6</integer>
         <key>Minute</key><integer>30</integer>
-        <key>Day</key><integer>1</integer>
+        <key>Day</key><integer>2</integer>
     </dict>
 
     <key>WorkingDirectory</key>

@@ -2,16 +2,30 @@
 
 Four macOS launchd User Agent jobs that run the autonomous trader.
 
-| Job | When (local time) | What |
-|---|---|---|
-| `com.terrancehan.quant-daily-trade` | 09:35 Mon-Fri | Compute targets, submit market entries with stop-losses |
-| `com.terrancehan.quant-daily-report` | 16:05 Mon-Fri | Email a summary of today's trades |
-| `com.terrancehan.quant-weekly-review` | 16:30 Fri | Email the week's aggregate |
-| `com.terrancehan.quant-monthly-review` | 16:30 on the 1st of each month | Run improver, possibly auto-apply, email |
+**The shipped plists are configured for a Mac on China Standard Time
+(CST, UTC+8).** That's the operator's actual setup. The schedules below
+map CST fire times to the ET trading-day equivalents during US daylight
+saving (EDT, the May-Nov half of the year). During US standard time
+(EST, Nov-Mar), each fire is **1 hour earlier in ET** — acceptable since
+none of these jobs are minute-critical (the daily trade just submits a
+few minutes before/after open; reports go out after close either way).
 
-**All four jobs assume your Mac's timezone is `America/New_York`.** If it
-isn't, either set it to ET (System Settings → General → Date & Time) or
-edit the `Hour` fields in each plist to match your local zone.
+| Job | When (Mac local, CST) | Maps to (EDT) | What |
+|---|---|---|---|
+| `com.terrancehan.quant-daily-trade` | 21:35 Mon-Fri | 09:35 Mon-Fri | Compute targets, submit market entries with stop-losses |
+| `com.terrancehan.quant-daily-report` | 06:30 Tue-Sat | 18:30 Mon-Fri | Email a summary of today's trades |
+| `com.terrancehan.quant-weekly-review` | 06:30 Sat | 18:30 Fri | Refit HRP weights, email the week's aggregate |
+| `com.terrancehan.quant-monthly-review` | 06:30 day-2 | 18:30 day-1 | Run improver (possibly auto-apply), email |
+
+The Mon-Fri / Tue-Sat / Sat / day-2 difference is because CST is
+~12-13 hours ahead of ET, so the early-morning CST fires correspond
+to the *previous* late-afternoon ET. The plists pass
+`--for-date "$(date -v-1d +%Y-%m-%d)"` for the three report jobs so
+the agent loads the correct ET trading day's records.
+
+If you ever move the Mac to America/New_York, edit each plist back to
+the original ET times (09:35 / 16:05 / 16:30 Fri / 16:30 day-1) and
+remove the `--for-date` arg from the report commands.
 
 ## First-time install
 

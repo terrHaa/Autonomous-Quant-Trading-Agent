@@ -3,8 +3,15 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Daily REPORT job: loads today's persisted daily-run JSON, renders the
-  markdown summary, emails it to REPORT_TO from .env. Runs at 16:05
-  LOCAL TIME, Monday through Friday (5 minutes after NYSE close).
+  markdown summary, emails it to REPORT_TO from .env.
+
+  Mac is on CST (+0800). 06:30 CST Tue-Sat maps to:
+    - 18:30 EDT (summer, Mon-Fri): 2.5h after the 16:00 close.
+    - 17:30 EST (winter, Mon-Fri): 1.5h after close.
+  Both are AFTER the previous trading day's close, so the report
+  captures all that day's fills. Weekday=2..6 in CST corresponds to
+  Mon..Fri in ET (CST is one calendar day ahead of ET during these
+  late/early hours).
 -->
 <plist version="1.0">
 <dict>
@@ -15,16 +22,19 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-daily-report</string>
+        <!-- --for-date $(yesterday) is the bridge between CST fire time and ET trading day:
+             the trade was saved with the CST date of its run (e.g. Monday CST = Monday ET);
+             we fire the report on Tuesday CST, so we want to load 'yesterday CST' = Monday CST. -->
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-daily-report --for-date "$(date -v-1d +%Y-%m-%d)"</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <array>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>1</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>2</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>3</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>4</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>6</integer></dict>
     </array>
 
     <key>WorkingDirectory</key>

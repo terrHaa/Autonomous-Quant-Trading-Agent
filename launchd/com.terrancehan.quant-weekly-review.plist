@@ -2,9 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Weekly REVIEW job: aggregates the week's daily-run JSONs, emails a
-  summary. Observation-only — no parameter changes. Runs Friday 16:30
-  LOCAL TIME (30 min after close).
+  Weekly REVIEW job: refits HRP weights across strategies, aggregates
+  the week's daily-run JSONs, emails a summary.
+
+  Mac is on CST (+0800). 06:30 Saturday CST maps to:
+    - 18:30 Friday EDT (summer): 2.5h after Friday close.
+    - 17:30 Friday EST (winter): 1.5h after Friday close.
+  --for-date "yesterday CST" resolves to Friday CST = Friday ET, which
+  is the week_ending date the weekly_review function expects.
 -->
 <plist version="1.0">
 <dict>
@@ -15,14 +20,14 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-weekly-review</string>
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-weekly-review --for-date "$(date -v-1d +%Y-%m-%d)"</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Hour</key><integer>16</integer>
+        <key>Hour</key><integer>6</integer>
         <key>Minute</key><integer>30</integer>
-        <key>Weekday</key><integer>5</integer>
+        <key>Weekday</key><integer>6</integer>
     </dict>
 
     <key>WorkingDirectory</key>

@@ -4,15 +4,22 @@
 <!--
   Daily TRADE job: cancels open orders, computes today's target weights
   from yesterday's close, submits market entries with atomic 5% stop-losses.
-  Runs at 09:35 LOCAL TIME, Monday through Friday.
+  Runs at 21:35 CHINA STANDARD TIME, Monday through Friday.
 
-  IMPORTANT: launchd interprets these times in the system's local
-  timezone. The schedule below assumes the Mac's TZ is set to America/
-  New_York (ET) — where NYSE trades. If your laptop is in another zone,
-  edit the Hour value or set your system TZ accordingly.
+  Mac is on CST (+0800). 21:35 CST same day maps to:
+    - 09:35 EDT (summer, US-DST): 5 min after market open. Ideal.
+    - 08:35 EST (winter, no-DST): 55 min before market open. Orders
+      submitted then queue at Alpaca and fill at the opening cross —
+      acceptable (we only submit market orders + OTO stops, all of
+      which fill at open or near-open prices either way).
 
-  Logs go to data/agent/launchd-logs/. Each job appends to its own log;
-  rotate manually if they grow.
+  TZ note for the next maintainer: this plist's schedule is hardcoded
+  for CST. If you move the Mac to a different timezone, edit the
+  Hour/Weekday values. If you want to eliminate the EDT/EST 1-hour
+  drift entirely, set the Mac TZ to America/New_York and use 09:35
+  / Mon-Fri instead.
+
+  Logs go to data/agent/launchd-logs/.
 -->
 <plist version="1.0">
 <dict>
@@ -28,11 +35,11 @@
 
     <key>StartCalendarInterval</key>
     <array>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>1</integer></dict>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>2</integer></dict>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>3</integer></dict>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>4</integer></dict>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>5</integer></dict>
     </array>
 
     <key>WorkingDirectory</key>
