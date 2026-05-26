@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily TRADE job: cancels open orders, computes today's target weights
+  from yesterday's close, submits market entries with atomic 5% stop-losses.
+  Runs at 09:35 LOCAL TIME, Monday through Friday.
+
+  IMPORTANT: launchd interprets these times in the system's local
+  timezone. The schedule below assumes the Mac's TZ is set to America/
+  New_York (ET) — where NYSE trades. If your laptop is in another zone,
+  edit the Hour value or set your system TZ accordingly.
+
+  Logs go to data/agent/launchd-logs/. Each job appends to its own log;
+  rotate manually if they grow.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.terrancehan.quant-daily-trade</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-daily-trade</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer><key>Weekday</key><integer>5</integer></dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/terrancehan/Claude trader/quant</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/daily-trade.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/daily-trade.err</string>
+
+    <!-- RunAtLoad false: don't fire immediately on install, only at the
+         scheduled time. The operator can manually invoke `uv run
+         quant-daily-trade --dry-run` first to sanity-check. -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

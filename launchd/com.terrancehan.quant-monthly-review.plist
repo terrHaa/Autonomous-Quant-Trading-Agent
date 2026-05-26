@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Monthly REVIEW job: aggregates the month's daily-run JSONs AND runs
+  the safety-railed auto-improver. Fires on the 1st of every month at
+  16:30 local time — the agent treats (today - 1 day) as the
+  month-ending date, so this catches the prior month's full activity.
+
+  Why 1st-of-next-month and not "last trading day of this month": launchd
+  can't natively express "last trading day". Running on the 1st gives
+  us the simplest deterministic schedule and the script handles any
+  weekend/holiday by reading cached data.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.terrancehan.quant-monthly-review</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-monthly-review</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>16</integer>
+        <key>Minute</key><integer>30</integer>
+        <key>Day</key><integer>1</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/terrancehan/Claude trader/quant</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/monthly-review.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/monthly-review.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
