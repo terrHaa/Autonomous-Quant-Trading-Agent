@@ -45,12 +45,16 @@ htmlcov/
 # --- Project-specific data ---
 # Raw and cached market data can be huge and is reproducible from source;
 # we don't version-control it. Add specific small fixtures back with `!data/...`.
-data/
+#
+# NOTE the leading slash: `/data/` only matches `./data/` at the repo root,
+# NOT `src/quant/data/` (which is the Python subpackage and must be tracked).
+# Without the slash, gitignore matches `data/` at *any* depth — a real footgun.
+/data/
 *.parquet
 *.feather
 *.h5
 *.duckdb
 
 # Backtest run outputs and reports — regenerable, often large.
-runs/
-reports/output/
+/runs/
+/reports/output/
