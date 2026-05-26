@@ -1,0 +1,56 @@
+# --- Secrets ---
+# Never commit real API keys. `.env.example` is the template; `.env` is local.
+.env
+.env.*
+!.env.example
+
+# --- Python bytecode & caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Virtual environments ---
+# uv places the venv at .venv/ by default.
+.venv/
+venv/
+env/
+
+# --- Build & distribution artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# --- Tool caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Project-specific data ---
+# Raw and cached market data can be huge and is reproducible from source;
+# we don't version-control it. Add specific small fixtures back with `!data/...`.
+data/
+*.parquet
+*.feather
+*.h5
+*.duckdb
+
+# Backtest run outputs and reports — regenerable, often large.
+runs/
+reports/output/

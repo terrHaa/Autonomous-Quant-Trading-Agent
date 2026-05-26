@@ -1,0 +1,103 @@
+# pyproject.toml — single source of truth for project metadata, dependencies,
+# and tool configuration. Managed by `uv`. See: https://docs.astral.sh/uv/
+#
+# Common commands (run from this directory):
+#   uv sync                  Install/refresh deps into .venv based on this file.
+#   uv add <package>         Add a runtime dependency.
+#   uv add --dev <package>   Add a dev-only dependency (tests, linters, etc.).
+#   uv run <command>         Run a command inside the project's venv.
+#   uv lock --upgrade        Refresh the lockfile to newer compatible versions.
+
+[project]
+name = "quant"
+version = "0.1.0"
+description = "Quantitative equity research and trading platform."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Terrance Han" }]
+
+# Runtime dependencies. Keep this list intentional — every dependency is a
+# surface for bugs and security issues. Add only what we actually use.
+dependencies = [
+    # --- Core numerical stack ---
+    "numpy>=1.26",         # n-dimensional arrays + linear algebra.
+    "pandas>=2.2",         # DataFrames; the lingua franca of quant Python.
+    "scipy>=1.13",         # Stats functions used in DSR, optimization, etc.
+
+    # --- Config & environment ---
+    "pyyaml>=6.0",         # Read configs/*.yaml.
+    "python-dotenv>=1.0",  # Load .env into environment variables.
+    "pydantic>=2.7",       # Typed config models — catches typos in YAML early.
+
+    # --- Broker / market data ---
+    "alpaca-py>=0.30",     # Official Alpaca SDK (market data + trading).
+
+    # --- Reporting ---
+    "jinja2>=3.1",         # Templating for markdown reports.
+]
+
+[project.optional-dependencies]
+# Optional groups installed via `uv sync --extra <name>`.
+# We don't pull these by default to keep the base install lean.
+notebooks = [
+    "jupyterlab>=4.2",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+]
+
+[dependency-groups]
+# Dev tools — installed by default with `uv sync`, but excluded from
+# `uv build` artifacts. See https://docs.astral.sh/uv/concepts/dependencies/
+dev = [
+    "pytest>=8.2",         # Test framework.
+    "pytest-cov>=5.0",     # Coverage reporting.
+    "ruff>=0.5",           # Linter + formatter (replaces black + flake8 + isort).
+    "mypy>=1.10",          # Static type checker.
+]
+
+# ----- Build system -----
+# We use Hatchling as the build backend. The "src layout" (code under src/quant/
+# instead of ./quant/) prevents accidentally importing local files instead of
+# the installed package — a subtle bug that bites every Python beginner once.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quant"]
+
+# ----- Tool configuration -----
+
+[tool.pytest.ini_options]
+# Where to look for tests, and how to run them.
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+# Ruff is both linter and formatter. One tool, fast, sane defaults.
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A reasonable starting set of lint rules. We can tighten later.
+# E,W = pycodestyle; F = pyflakes; I = isort; B = bugbear; UP = pyupgrade.
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # Line too long — ruff format handles wrapping; some lines stay long.
+]
+
+[tool.mypy]
+# Strict-ish typing. We don't enable full --strict yet to avoid blocking early
+# exploratory code, but these catch the most common bugs.
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true  # Many quant libs lack stubs; revisit later.

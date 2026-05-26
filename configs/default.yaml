@@ -1,0 +1,104 @@
+# default.yaml — baseline configuration for backtests and live runs.
+#
+# This file is the *defaults*. Specific experiments should create their own
+# YAML (e.g. configs/momentum_v1.yaml) and override only what's different,
+# rather than editing this file directly. That way "default" remains a known
+# reference point we can compare against.
+
+# ---------------------------------------------------------------------------
+# Universe — the set of tickers a strategy is allowed to consider.
+# ---------------------------------------------------------------------------
+universe:
+  # Named universe. The data layer is responsible for resolving this name
+  # into an actual list of tickers (e.g. "sp500" -> current S&P 500 members).
+  # Using a name (not a hard-coded list) means we can rebuild membership
+  # historically and avoid survivorship bias.
+  name: sp500_liquid
+
+  # Liquidity filter — applied on top of the named universe. A strategy that
+  # trades names below this threshold will get slippage that no backtest can
+  # honestly model. Numbers in USD.
+  min_avg_dollar_volume_20d: 5_000_000
+
+  # Price filter — penny stocks have idiosyncratic dynamics most equity
+  # strategies aren't designed for.
+  min_price: 5.0
+
+# ---------------------------------------------------------------------------
+# Date range — the period a backtest covers.
+# ---------------------------------------------------------------------------
+dates:
+  start: "2015-01-01"
+  end: "2024-12-31"
+
+  # We deliberately hold out the most recent ~1 year for true out-of-sample
+  # evaluation. Strategy development uses only data up to `train_end`;
+  # walk-forward and final evaluation use the holdout.
+  train_end: "2023-12-31"
+
+# ---------------------------------------------------------------------------
+# Risk / sizing — global defaults. Individual strategies can request tighter
+# limits but cannot loosen them; the risk overlay in src/quant/risk/ enforces.
+# ---------------------------------------------------------------------------
+risk:
+  # Target annualized portfolio volatility, expressed as a decimal.
+  # 0.10 = 10% annual vol — roughly half the long-run vol of the S&P 500.
+  # The allocator scales gross exposure to hit this target.
+  vol_target_annual: 0.10
+
+  # Hard cap on gross leverage (sum of |position| / equity). 1.0 = no leverage.
+  max_gross_leverage: 1.5
+
+  # Hard cap on net exposure. 1.0 = fully long; 0.0 = market-neutral.
+  max_net_exposure: 1.0
+
+  # Per-name position cap as a fraction of equity. Prevents single-name blowups.
+  max_position_weight: 0.05
+
+  # Drawdown kill switch: if peak-to-trough equity drawdown exceeds this,
+  # the risk overlay flattens all positions and pauses trading.
+  max_drawdown_kill: 0.15
+
+# ---------------------------------------------------------------------------
+# Backtest engine settings.
+# ---------------------------------------------------------------------------
+backtest:
+  # Initial equity in USD.
+  starting_equity: 1_000_000
+
+  # Frequency at which the strategy is allowed to rebalance.
+  # Daily is a sensible default for most equity factor strategies.
+  rebalance: daily
+
+  # Cost model — applied to every fill. Numbers in basis points (bps).
+  # 1 bp = 0.01% = 0.0001. These are conservative estimates for liquid US
+  # equities at a retail/prosumer broker like Alpaca.
+  costs:
+    commission_bps: 0.0      # Alpaca commission-free; left here for clarity.
+    spread_bps: 2.0          # Half-spread crossed on entry+exit.
+    slippage_bps: 3.0        # Impact + adverse selection buffer.
+
+# ---------------------------------------------------------------------------
+# Evaluation — how we judge a strategy. See docs/specs/dsr.md (TBD).
+# ---------------------------------------------------------------------------
+evaluation:
+  # Risk-free rate, annualized, used in Sharpe-family metrics.
+  risk_free_annual: 0.04
+
+  # Number of trading days per year. 252 is the US equity convention.
+  trading_days_per_year: 252
+
+  # Walk-forward settings.
+  walk_forward:
+    train_years: 3
+    test_years: 1
+    step_years: 1
+
+# ---------------------------------------------------------------------------
+# Execution — only consulted when running paper or live, not in backtest.
+# ---------------------------------------------------------------------------
+execution:
+  broker: alpaca
+  # Which Alpaca environment to use. Mirrors ALPACA_ENV in .env; this is the
+  # default if the env var is unset. Override in a run-specific config.
+  alpaca_env: paper
