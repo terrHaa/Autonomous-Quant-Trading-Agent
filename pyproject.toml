@@ -23,6 +23,8 @@ dependencies = [
     "numpy>=1.26",         # n-dimensional arrays + linear algebra.
     "pandas>=2.2",         # DataFrames; the lingua franca of quant Python.
     "scipy>=1.13",         # Stats functions used in DSR, optimization, etc.
+    "pyarrow>=15.0",       # Parquet read/write engine for pandas (and a strong
+                           # columnar memory format we'll lean on more later).
 
     # --- Config & environment ---
     "pyyaml>=6.0",         # Read configs/*.yaml.
