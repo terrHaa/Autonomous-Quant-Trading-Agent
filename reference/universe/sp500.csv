@@ -1,0 +1,35 @@
+# S&P 500 membership history — STARTER set, not comprehensive.
+#
+# Source: hand-curated from Wikipedia "List of S&P 500 companies" and the
+# linked "Selected changes" history (snapshot 2024).
+#
+# Columns
+# -------
+#   symbol  - ticker (uppercase)
+#   added   - first day IN the index (ISO date, INCLUSIVE)
+#   removed - first day NOT in the index (ISO date, EXCLUSIVE), or blank
+#             if the symbol is still in the index today
+#
+# Conventions and limitations: see src/quant/data/universe.py module docstring.
+#
+# This file is intentionally short. It's enough to demo point-in-time
+# membership and to make survivorship bias visible (note the LEH and GE
+# rows — both removed historically). To grow it toward the full ~500
+# current members and ~1500 historical members, see reference/README.md.
+symbol,added,removed
+AAPL,1982-11-30,
+MSFT,1994-06-01,
+AMZN,2005-11-18,
+NVDA,2001-11-30,
+TSLA,2020-12-21,
+META,2013-12-23,
+GOOGL,2006-03-31,
+V,2009-12-22,
+MA,2008-07-18,
+BRK.B,2010-02-16,
+JPM,1975-06-30,
+JNJ,1957-03-04,
+KO,1957-03-04,
+WMT,1982-08-31,
+LEH,1957-03-04,2008-09-15
+GE,1957-03-04,2018-06-26
