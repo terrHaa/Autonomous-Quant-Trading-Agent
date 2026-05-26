@@ -11,4 +11,23 @@ Key responsibilities:
   explicit, deliberate config flag — there is no accidental path to it.
 - Surface errors clearly. A failed order is *not* the same as a filled-zero
   order; collapsing the two is how live PnL goes mysteriously sideways.
+
+Currently available:
+- ``AlpacaExecutor`` — paper or (deliberately gated) live order submission.
+- ``ExecutionReport``, ``ProposedOrder``, ``SubmittedOrder`` — structured
+  records of what was attempted / done.
 """
+
+from quant.execution.alpaca_executor import (
+    AlpacaExecutor,
+    ExecutionReport,
+    ProposedOrder,
+    SubmittedOrder,
+)
+
+__all__ = [
+    "AlpacaExecutor",
+    "ExecutionReport",
+    "ProposedOrder",
+    "SubmittedOrder",
+]
