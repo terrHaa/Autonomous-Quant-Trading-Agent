@@ -12,10 +12,15 @@ Strategies must:
   step that runs once per walk-forward fold (deferred for now).
 
 Currently available:
-- ``SmaCrossover`` — 50/200-day moving-average crossover (classic; usually
-  doesn't make money, but exercises the engine on realistic mechanics).
+- ``SmaCrossover`` — 50/200-day moving-average crossover (trend-following;
+  classic). Usually doesn't make money post-costs on indices, but
+  exercises the engine on realistic mechanics.
+- ``MeanReversion`` — short-term reversion (Lehmann 1990 single-name
+  version). Roughly anti-correlated with momentum on a per-name basis;
+  built second so HRP (Step 17) has uncorrelated streams to allocate.
 """
 
+from quant.strategies.mean_reversion import MeanReversion
 from quant.strategies.sma_crossover import SmaCrossover
 
-__all__ = ["SmaCrossover"]
+__all__ = ["MeanReversion", "SmaCrossover"]
