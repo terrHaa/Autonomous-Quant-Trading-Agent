@@ -157,18 +157,18 @@ def _load_from_csv(name: str, csv_path: Path) -> Universe:
     return Universe(name=name, _table=df)
 
 
-def load_top100_snapshot() -> list[str]:
-    """Load the top-100 S&P 500 snapshot used by the autonomous agent.
+def load_top50_snapshot() -> list[str]:
+    """Load the top-50 S&P 500 snapshot used by the autonomous agent.
 
     Unlike :func:`load_universe`, this is NOT a point-in-time membership
     history — it's a *static snapshot* of "the names we're allowed to
     trade this quarter." Refresh the CSV at ``reference/universe/
-    sp500_top100.csv`` from a current market-cap ranking each quarter.
+    sp500_top50.csv`` from a current market-cap ranking each quarter.
 
     Returns the symbols as a list, uppercased and deduped (insertion
     order preserved).
     """
-    csv_path = _REFERENCE_DIR / "sp500_top100.csv"
+    csv_path = _REFERENCE_DIR / "sp500_top50.csv"
     if not csv_path.exists():
         raise FileNotFoundError(
             f"Top-100 snapshot CSV not found at {csv_path}. "

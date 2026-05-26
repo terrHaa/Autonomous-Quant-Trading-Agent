@@ -49,7 +49,7 @@ from quant.backtest.types import Snapshot
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_top100_snapshot
+from quant.data.universe import load_top50_snapshot
 from quant.execution.alpaca_executor import AlpacaExecutor
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def run_daily_trade(
     """
     today = today or date.today()
     config = config or load_config()
-    universe = universe or load_top100_snapshot()
+    universe = universe or load_top50_snapshot()
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
     state = ensemble_state or load_ensemble_state()

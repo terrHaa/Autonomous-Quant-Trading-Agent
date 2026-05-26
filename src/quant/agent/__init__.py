@@ -5,7 +5,7 @@ mechanical autonomous trader the operator commissioned. Composes the
 existing platform pieces — strategies, allocator, risk overlay, executor,
 registry — into a daily-cadence loop that:
 
-- Loads the top-100 S&P snapshot universe.
+- Loads the top-50 S&P snapshot universe.
 - Runs three strategies via the ENSEMBLE (SMA crossover + mean reversion
   + cross-sectional momentum), combining their per-symbol targets via
   HRP weights persisted in ``EnsembleState``.

@@ -48,7 +48,7 @@ class CrossSectionalMomentum:
     ----------
     symbols
         Universe to rank. Typically loaded from
-        ``reference/universe/sp500_top100.csv``.
+        ``reference/universe/sp500_top50.csv``.
     lookback
         Total return window length, in trading days. Default 60 (≈ 3 mo).
     skip

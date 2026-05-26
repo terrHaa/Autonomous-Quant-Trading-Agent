@@ -78,7 +78,7 @@ class EnsembleState:
     """The agent's tunable knobs — one bag of values, one file on disk.
 
     Per-strategy params and the HRP weights across strategies live here.
-    The HARD operator rules (5% stop, 20% cap, top-100 universe) stay
+    The HARD operator rules (5% stop, 20% cap, top-50 universe) stay
     as constants in ``daily_runner.py`` — the ensemble never touches them.
     """
 

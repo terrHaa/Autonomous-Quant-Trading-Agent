@@ -43,7 +43,7 @@ from quant.agent.reports import render_monthly_report
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_top100_snapshot
+from quant.data.universe import load_top50_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def run_monthly_review(
         lookback=current_state.xsec_lookback,
         skip=current_state.xsec_skip,
     )
-    universe = universe or load_top100_snapshot()
+    universe = universe or load_top50_snapshot()
     improvement_result: ImprovementResult | None = None
     recommendations: list[str] = []
 

@@ -1,0 +1,67 @@
+# S&P 500 — top 50 by market cap, snapshot as of 2025-Q4.
+#
+# THIS FILE ROTATES QUARTERLY. Market caps shift; refresh from a trusted
+# source (e.g., SlickCharts, iShares ETF holdings export) at the start of
+# each calendar quarter.
+#
+# The agent (quant.agent) loads this list at runtime to restrict its
+# trading universe per the operator's rule "only top 50 S&P 500 by
+# market cap". Row order doesn't matter — the agent treats it as a set.
+#
+# Notable exclusions vs. naive lists: SAP and ASML are large-cap global
+# tech, but they're listed in Germany / the Netherlands respectively
+# and are NOT S&P 500 constituents. ADRs trading in the US are not the
+# same as index membership.
+#
+# Each row: symbol[,sector]. Sector is informational only.
+symbol,sector
+NVDA,Information Technology
+AAPL,Information Technology
+MSFT,Information Technology
+GOOGL,Communication Services
+GOOG,Communication Services
+AMZN,Consumer Discretionary
+META,Communication Services
+AVGO,Information Technology
+TSLA,Consumer Discretionary
+BRK.B,Financials
+WMT,Consumer Staples
+LLY,Health Care
+JPM,Financials
+V,Financials
+MA,Financials
+XOM,Energy
+ORCL,Information Technology
+COST,Consumer Staples
+UNH,Health Care
+NFLX,Communication Services
+JNJ,Health Care
+HD,Consumer Discretionary
+ABBV,Health Care
+PG,Consumer Staples
+BAC,Financials
+KO,Consumer Staples
+TMUS,Communication Services
+CRM,Information Technology
+WFC,Financials
+CSCO,Information Technology
+PLTR,Information Technology
+PM,Consumer Staples
+ABT,Health Care
+CVX,Energy
+IBM,Information Technology
+MS,Financials
+GE,Industrials
+LIN,Materials
+MCD,Consumer Discretionary
+GS,Financials
+DIS,Communication Services
+AMD,Information Technology
+CAT,Industrials
+MRK,Health Care
+AXP,Financials
+ISRG,Health Care
+INTU,Information Technology
+T,Communication Services
+NOW,Information Technology
+PEP,Consumer Staples
