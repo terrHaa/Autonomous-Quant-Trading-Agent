@@ -19,6 +19,22 @@ Currently available:
 See docs/specs/dsr.md (TBD) for the DSR math and rationale.
 """
 
+from quant.evaluation.dsr import (
+    deflated_sharpe_ratio,
+    dsr_for,
+    estimate_var_sr_from_trials,
+    probabilistic_sharpe_ratio,
+    psr_for,
+)
 from quant.evaluation.metrics import Metrics, compute_metrics, metrics_for
 
-__all__ = ["Metrics", "compute_metrics", "metrics_for"]
+__all__ = [
+    "Metrics",
+    "compute_metrics",
+    "deflated_sharpe_ratio",
+    "dsr_for",
+    "estimate_var_sr_from_trials",
+    "metrics_for",
+    "probabilistic_sharpe_ratio",
+    "psr_for",
+]
