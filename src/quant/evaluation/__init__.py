@@ -27,9 +27,16 @@ from quant.evaluation.dsr import (
     psr_for,
 )
 from quant.evaluation.metrics import Metrics, compute_metrics, metrics_for
+from quant.evaluation.walk_forward import (
+    WalkForwardFold,
+    WalkForwardResult,
+    run_walk_forward,
+)
 
 __all__ = [
     "Metrics",
+    "WalkForwardFold",
+    "WalkForwardResult",
     "compute_metrics",
     "deflated_sharpe_ratio",
     "dsr_for",
@@ -37,4 +44,5 @@ __all__ = [
     "metrics_for",
     "probabilistic_sharpe_ratio",
     "psr_for",
+    "run_walk_forward",
 ]
