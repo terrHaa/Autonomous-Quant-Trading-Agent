@@ -23,6 +23,7 @@ from quant.data.alpaca_client import (
     AlpacaCredentials,
     AlpacaDataClient,
 )
+from quant.data.integrity import check_daily_bars
 
 
 @pytest.fixture
@@ -79,6 +80,19 @@ def test_returned_bars_satisfy_ohlc_invariants(client: AlpacaDataClient) -> None
 
     # No negative volume.
     assert (df["volume"] >= 0).all()
+
+
+@pytest.mark.integration
+def test_real_alpaca_bars_pass_integrity_checks(client: AlpacaDataClient) -> None:
+    """A real Alpaca fetch must satisfy our full integrity contract.
+
+    This is the cross-product check: if Alpaca starts returning subtly
+    broken data (zero volume on illiquid IEX names, weekend prints from
+    a feed glitch, etc.), we fail in CI here rather than discovering it
+    weeks later via a weird backtest result.
+    """
+    df = client.get_daily_bars(["AAPL", "MSFT"], date(2024, 1, 2), date(2024, 1, 31))
+    check_daily_bars(df)  # raises BarsIntegrityError if anything is off
 
 
 @pytest.mark.integration
