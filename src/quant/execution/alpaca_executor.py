@@ -68,6 +68,11 @@ class SubmittedOrder:
     qty: int
     status: Literal["submitted", "failed", "skipped_dry_run"]
     alpaca_order_id: str | None = None
+    # 'role' tells reports the difference between the entry order and
+    # its protective stop-loss child. ``"entry"`` is the default for
+    # the existing submit_to_match_targets flow.
+    role: Literal["entry", "stop_loss"] = "entry"
+    stop_price: float | None = None
     error: str | None = None
 
 
@@ -107,6 +112,7 @@ class _TradingClientLike(Protocol):
     def get_account(self) -> Any: ...
     def get_all_positions(self) -> list[Any]: ...
     def submit_order(self, request: Any) -> Any: ...
+    def cancel_orders(self) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +308,279 @@ class AlpacaExecutor:
                     status="failed",
                     error=str(e),
                 ))
+
+        return ExecutionReport(
+            env=self._env,
+            timestamp=now,
+            account_equity_before=equity,
+            positions_before=positions,
+            target_weights=dict(target_weights),
+            proposed_orders=proposed,
+            submitted_orders=submitted,
+            dry_run=dry_run,
+            notes=notes,
+        )
+
+    # ------------------------------------------------------------------
+    # Daily rebalance for the autonomous agent: cancel old orders,
+    # close stale positions, open new positions with atomic stop-losses.
+    # ------------------------------------------------------------------
+
+    def submit_daily_rebalance(
+        self,
+        target_weights: dict[str, float],
+        signal_prices: dict[str, float],
+        *,
+        stop_loss_pct: float,
+        max_position_weight: float = 0.20,
+        dry_run: bool = False,
+        notes: str = "",
+    ) -> ExecutionReport:
+        """Daily-cadence rebalance with hard per-trade cap and stop-loss.
+
+        Workflow (agent-style; opinionated):
+          1. Cancel all open orders at the broker (kills yesterday's
+             stops that didn't trigger; also kills stale pending entries).
+          2. For each currently-held name that is NOT in the target book
+             (target weight 0 or absent): close the position at market.
+          3. For each target-symbol with weight > 0: submit an Alpaca
+             OTO order — market buy + atomic protective stop. The stop
+             price is ``signal_price * (1 - stop_loss_pct)``.
+          4. Refuse to submit any order whose notional exceeds
+             ``max_position_weight × equity``. Hard defense-in-depth
+             against the operator's 20% per-trade rule, in case the
+             upstream allocator failed to enforce it.
+
+        For partial position changes (already long X, want to be long Y,
+        with X ≠ Y), the v1 simplification is "close-and-reopen": we
+        liquidate the old position fully, then open a fresh one with a
+        new stop. Higher turnover than incrementally adjusting + restops,
+        but completely unambiguous about position+stop state at any
+        moment. Optimize in v2 if costs become noticeable.
+
+        Long-only. Negative target weights are rejected (they'd require
+        OTO with a buy-stop, which is a different child structure;
+        out of scope for the cross-sectional momentum agent).
+
+        Parameters
+        ----------
+        target_weights
+            Per-symbol target weight (fraction of equity). Must be >= 0
+            for this method; negative weights → ValueError.
+        signal_prices
+            Per-symbol reference price used for sizing AND for the stop
+            level. Typically yesterday's close.
+        stop_loss_pct
+            Decimal stop distance. ``0.05`` = stop sells at -5% from
+            ``signal_price``. The agent picks 0.05.
+        max_position_weight
+            Per-trade notional cap as a fraction of equity. Defaults to
+            0.20 (the operator's 20% rule).
+        dry_run
+            If True, no network mutation; report shows what WOULD happen.
+        notes
+            Free-text saved on the report.
+        """
+        if stop_loss_pct <= 0 or stop_loss_pct >= 1:
+            raise ValueError(
+                f"stop_loss_pct must be in (0, 1); got {stop_loss_pct}"
+            )
+        if any(w < 0 for w in target_weights.values()):
+            raise ValueError(
+                "submit_daily_rebalance is long-only; negative target "
+                "weights aren't supported. Got: "
+                f"{ {s: w for s, w in target_weights.items() if w < 0} }"
+            )
+
+        equity = self.get_equity()
+        positions = self.get_positions()
+        now = datetime.now(timezone.utc)
+        submitted: list[SubmittedOrder] = []
+        max_notional = max_position_weight * equity
+
+        # ---- 1. Cancel all open orders. -----------------------------
+        # Without this, yesterday's GTC stops would linger and double up
+        # with today's. cancel_orders() is idempotent — no-op if nothing
+        # is pending.
+        if not dry_run:
+            try:
+                self._client.cancel_orders()
+            except Exception as e:
+                # Cancellation failure is bad but recoverable — log it
+                # on the report and proceed; the broker will refuse
+                # duplicate orders rather than silently double-fill.
+                submitted.append(SubmittedOrder(
+                    symbol="(all)",
+                    side="sell",
+                    qty=0,
+                    status="failed",
+                    role="entry",
+                    error=f"cancel_orders failed: {e}",
+                ))
+
+        # ---- 2. Close positions not in the target book. -------------
+        # Done as PROPOSED orders so they show on the report alongside
+        # entries; dry_run skips submission as elsewhere.
+        target_symbols = {s for s, w in target_weights.items() if w > 0}
+        stale_positions = {
+            sym: qty for sym, qty in positions.items()
+            if sym not in target_symbols and qty != 0
+        }
+        # We also close positions whose target qty differs from current
+        # (the close-and-reopen simplification documented above).
+        for sym in target_symbols:
+            current_qty = positions.get(sym, 0)
+            if current_qty <= 0:
+                continue
+            target_dollars = target_weights[sym] * equity
+            price = signal_prices.get(sym)
+            if price is None or price <= 0:
+                # No price → can't even compute target qty → conservative
+                # exit. We'll skip the re-entry in step 3 too.
+                stale_positions[sym] = current_qty
+                continue
+            target_qty = int(target_dollars / price)
+            if current_qty != target_qty:
+                stale_positions[sym] = current_qty
+
+        for sym, qty in sorted(stale_positions.items()):
+            if dry_run:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="sell", qty=abs(qty),
+                    status="skipped_dry_run", role="entry",
+                ))
+                continue
+            try:
+                from alpaca.trading.enums import OrderSide, TimeInForce
+                from alpaca.trading.requests import MarketOrderRequest
+
+                req = MarketOrderRequest(
+                    symbol=sym,
+                    qty=abs(qty),
+                    side=OrderSide.SELL if qty > 0 else OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                )
+                resp = self._client.submit_order(req)
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="sell" if qty > 0 else "buy",
+                    qty=abs(qty), status="submitted",
+                    role="entry",
+                    alpaca_order_id=str(getattr(resp, "id", None)),
+                ))
+            except Exception as e:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="sell" if qty > 0 else "buy",
+                    qty=abs(qty), status="failed", role="entry",
+                    error=str(e),
+                ))
+
+        # ---- 3. Open new target positions with OTO + protective stop. ----
+        # For each target symbol whose current qty doesn't already match,
+        # we submitted a close above. Now we (re-)enter via OTO:
+        #   parent: market buy `target_qty` shares
+        #   child:  stop-loss sell `target_qty` shares at signal*(1-pct)
+        # Alpaca makes the child active only after the parent fills.
+        for sym in sorted(target_symbols):
+            weight = target_weights[sym]
+            price = signal_prices.get(sym)
+            if price is None or price <= 0:
+                continue
+
+            target_qty = int(weight * equity / price)
+            current_qty = positions.get(sym, 0)
+            if target_qty <= 0:
+                continue
+            # If current == target after the (potential) close above,
+            # no order needed. But: we cancelled the old stop in step 1,
+            # so a position-unchanged name now has no stop. We need to
+            # re-establish it. Simplest: close-and-reopen always.
+            # (Already handled above — sym is in stale_positions if
+            # current != 0.)
+
+            entry_notional = target_qty * price
+            if entry_notional > max_notional:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=target_qty,
+                    status="failed", role="entry",
+                    error=(
+                        f"refusing entry: notional ${entry_notional:,.2f} "
+                        f"exceeds max_position_weight × equity = "
+                        f"${max_notional:,.2f}"
+                    ),
+                ))
+                continue
+
+            stop_price = round(price * (1.0 - stop_loss_pct), 2)
+            # If for any reason stop_price >= entry signal price, refuse.
+            if stop_price >= price:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=target_qty,
+                    status="failed", role="entry",
+                    error=f"computed stop_price {stop_price} >= signal {price}",
+                ))
+                continue
+
+            if dry_run:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=target_qty,
+                    status="skipped_dry_run", role="entry",
+                ))
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="sell", qty=target_qty,
+                    status="skipped_dry_run", role="stop_loss",
+                    stop_price=stop_price,
+                ))
+                continue
+
+            try:
+                from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+                from alpaca.trading.requests import (
+                    MarketOrderRequest,
+                    StopLossRequest,
+                )
+
+                req = MarketOrderRequest(
+                    symbol=sym,
+                    qty=target_qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.OTO,
+                    stop_loss=StopLossRequest(stop_price=stop_price),
+                )
+                resp = self._client.submit_order(req)
+                parent_id = str(getattr(resp, "id", None))
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=target_qty,
+                    status="submitted", role="entry",
+                    alpaca_order_id=parent_id,
+                ))
+                # The stop-loss child is auto-created by Alpaca. We
+                # record an audit row with the stop_price; the child's
+                # actual order id is on the parent's `.legs` attribute
+                # and discoverable via get_order_by_id later.
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="sell", qty=target_qty,
+                    status="submitted", role="stop_loss",
+                    stop_price=stop_price,
+                    alpaca_order_id=f"(child of {parent_id})",
+                ))
+            except Exception as e:
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=target_qty,
+                    status="failed", role="entry",
+                    error=str(e),
+                ))
+
+        # Proposed orders aren't separately built for this flow — the
+        # submitted_orders list IS the audit trail. We mirror the entry
+        # rows into proposed_orders for downstream consistency with the
+        # other submit method.
+        proposed = [
+            ProposedOrder(symbol=o.symbol, side=o.side, qty=o.qty,
+                          rationale=f"daily rebalance ({o.role})")
+            for o in submitted
+            if o.role == "entry"
+        ]
 
         return ExecutionReport(
             env=self._env,

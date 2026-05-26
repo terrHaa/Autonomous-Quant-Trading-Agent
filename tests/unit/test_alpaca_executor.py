@@ -52,6 +52,7 @@ class _FakeTradingClient:
         self.submitted: list = []
         self._raise_on_submit = raise_on_submit
         self._next_order_id = 0
+        self.cancel_calls = 0
 
     def get_account(self) -> _FakeAccount:
         return _FakeAccount(equity=self._equity)
@@ -65,6 +66,9 @@ class _FakeTradingClient:
         self._next_order_id += 1
         self.submitted.append(request)
         return _FakeOrderResponse(order_id=f"fake-{self._next_order_id}")
+
+    def cancel_orders(self) -> None:
+        self.cancel_calls += 1
 
 
 # ---------------------------------------------------------------------------
@@ -244,3 +248,119 @@ def test_report_includes_snapshot_of_inputs() -> None:
     assert report.target_weights == targets
     assert report.notes == "test run"
     assert report.dry_run is True
+
+
+# ---------------------------------------------------------------------------
+# submit_daily_rebalance — the agent's flow
+# ---------------------------------------------------------------------------
+
+
+def test_daily_rebalance_cancels_open_orders_first() -> None:
+    """Every daily run starts by clearing yesterday's stops."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+    )
+    assert client.cancel_calls == 1
+
+
+def test_daily_rebalance_dry_run_does_not_call_cancel_or_submit() -> None:
+    """Dry run is fully read-only — no broker mutation at all."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        dry_run=True,
+    )
+    assert client.cancel_calls == 0
+    assert client.submitted == []
+    # Report still shows what WOULD have happened.
+    statuses = {o.status for o in report.submitted_orders}
+    assert statuses == {"skipped_dry_run"}
+
+
+def test_daily_rebalance_emits_entry_and_stop_loss_rows() -> None:
+    """For each new long, the report has TWO rows: entry + stop_loss audit."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},   # $10k / $200 = 50 shares
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        dry_run=True,
+    )
+    roles = sorted(o.role for o in report.submitted_orders)
+    assert roles == ["entry", "stop_loss"]
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # 5% below the signal price of $200 = $190.
+    assert stop_row.stop_price == 190.0
+
+
+def test_daily_rebalance_refuses_oversize_orders() -> None:
+    """The 20%-of-equity per-trade cap is enforced as a HARD refusal,
+    even if the upstream target weight implies a larger notional."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    # Target 30% in AAPL — exceeds 20% default cap.
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.30},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        max_position_weight=0.20,
+        dry_run=False,
+    )
+    failed = [o for o in report.submitted_orders if o.status == "failed"]
+    assert len(failed) >= 1
+    assert "max_position_weight" in failed[0].error
+
+
+def test_daily_rebalance_rejects_negative_target_weight() -> None:
+    """This method is long-only; shorts would need OTO with a buy-stop child."""
+    exec_ = AlpacaExecutor(trading_client=_FakeTradingClient())
+    with pytest.raises(ValueError, match="long-only"):
+        exec_.submit_daily_rebalance(
+            target_weights={"AAPL": -0.1},
+            signal_prices={"AAPL": 200.0},
+            stop_loss_pct=0.05,
+        )
+
+
+def test_daily_rebalance_rejects_bad_stop_pct() -> None:
+    exec_ = AlpacaExecutor(trading_client=_FakeTradingClient())
+    with pytest.raises(ValueError, match="stop_loss_pct"):
+        exec_.submit_daily_rebalance(
+            target_weights={"AAPL": 0.1},
+            signal_prices={"AAPL": 200.0},
+            stop_loss_pct=0,
+        )
+    with pytest.raises(ValueError, match="stop_loss_pct"):
+        exec_.submit_daily_rebalance(
+            target_weights={"AAPL": 0.1},
+            signal_prices={"AAPL": 200.0},
+            stop_loss_pct=1.5,
+        )
+
+
+def test_daily_rebalance_closes_stale_positions_not_in_targets() -> None:
+    """Yesterday's longs that aren't on today's list get sold to flat."""
+    client = _FakeTradingClient(
+        equity=100_000,
+        positions={"OLDPOS": 50},      # held but not in target
+    )
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},  # OLDPOS not mentioned → flatten
+        signal_prices={"AAPL": 200.0, "OLDPOS": 80.0},
+        stop_loss_pct=0.05,
+        dry_run=True,
+    )
+    # Should have a sell of OLDPOS in the report.
+    sells = [o for o in report.submitted_orders
+             if o.symbol == "OLDPOS" and o.side == "sell"]
+    assert len(sells) == 1
+    assert sells[0].qty == 50
