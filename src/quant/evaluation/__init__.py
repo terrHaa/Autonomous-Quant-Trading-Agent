@@ -11,8 +11,14 @@ explicitly correct for the two biggest research-pipeline biases:
   training window and evaluates only on the subsequent out-of-sample window,
   preventing the evaluator from leaking future information.
 
-Other metrics here: probabilistic Sharpe ratio, Calmar, max drawdown, turnover,
-hit rate, exposure decomposition.
+Currently available:
+- ``Metrics``, ``compute_metrics``, ``metrics_for`` — standard performance
+  ratios (Sharpe, Sortino, Calmar, max drawdown, etc.)
+- DSR and walk-forward to come.
 
-See docs/specs/dsr.md for the math and rationale.
+See docs/specs/dsr.md (TBD) for the DSR math and rationale.
 """
+
+from quant.evaluation.metrics import Metrics, compute_metrics, metrics_for
+
+__all__ = ["Metrics", "compute_metrics", "metrics_for"]
