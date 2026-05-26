@@ -18,10 +18,23 @@ The allocator output is *proposed* weights. The risk overlay
 
 Currently available:
 - ``hrp_weights`` — Hierarchical Risk Parity (López de Prado 2016).
+- ``vol_target_scale``, ``apply_vol_target`` — scale gross exposure to a
+  target annualized vol.
+- ``kelly_leverage`` — pure/fractional Kelly optimal leverage.
 
 See docs/specs/hrp.md for the HRP construction details.
 """
 
 from quant.allocator.hrp import hrp_weights
+from quant.allocator.sizing import (
+    apply_vol_target,
+    kelly_leverage,
+    vol_target_scale,
+)
 
-__all__ = ["hrp_weights"]
+__all__ = [
+    "apply_vol_target",
+    "hrp_weights",
+    "kelly_leverage",
+    "vol_target_scale",
+]
