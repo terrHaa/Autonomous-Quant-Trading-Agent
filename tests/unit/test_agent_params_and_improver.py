@@ -1,4 +1,4 @@
-"""Tests for the agent's persistent strategy params and the auto-improver.
+"""Tests for the auto-improver and its StrategyParams data shape.
 
 The improver tests mock out the backtest engine via injected fake
 ``evaluate_candidate`` results — full backtests on 100-name × 2-year
@@ -6,9 +6,6 @@ data take too long for unit tests.
 """
 
 from __future__ import annotations
-
-from datetime import date, timedelta
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,37 +17,11 @@ from quant.agent.improver import (
     default_grid,
     search_improvements,
 )
-from quant.agent.params import (
-    DEFAULT_PARAMS_PATH,
-    StrategyParams,
-    load_params,
-    save_params,
-)
-
+from quant.agent.params import StrategyParams
 
 # ---------------------------------------------------------------------------
-# StrategyParams persistence
+# StrategyParams construction validation
 # ---------------------------------------------------------------------------
-
-
-def test_load_returns_defaults_when_file_absent(tmp_path: Path) -> None:
-    """Fresh install: no file → safe defaults."""
-    p = load_params(path=tmp_path / "nope.json")
-    assert p == StrategyParams(top_k=10, lookback=60, skip=5)
-
-
-def test_save_then_load_round_trips(tmp_path: Path) -> None:
-    fp = tmp_path / "params.json"
-    save_params(StrategyParams(top_k=5, lookback=120, skip=10), path=fp)
-    loaded = load_params(path=fp)
-    assert loaded == StrategyParams(top_k=5, lookback=120, skip=10)
-
-
-def test_save_creates_parent_directory(tmp_path: Path) -> None:
-    """Auto-mkdir so the improver doesn't need to think about it."""
-    fp = tmp_path / "deep" / "nested" / "params.json"
-    save_params(StrategyParams(top_k=7, lookback=40, skip=2), path=fp)
-    assert fp.exists()
 
 
 def test_invalid_params_rejected_at_construction() -> None:

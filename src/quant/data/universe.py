@@ -45,7 +45,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 # Project root — same trick as config.py. This file lives at
 # src/quant/data/universe.py, so the root is FOUR parents up:
 #   universe.py -> data -> quant -> src -> <project root>

@@ -44,7 +44,6 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +58,6 @@ from quant.strategies import (
     MeanReversion,
     SmaCrossover,
 )
-
 
 logger = logging.getLogger(__name__)
 

@@ -26,7 +26,6 @@ from quant.agent.ensemble import (
 from quant.backtest.types import Snapshot
 from quant.data.alpaca_client import BAR_COLUMNS
 
-
 # ---------------------------------------------------------------------------
 # State persistence
 # ---------------------------------------------------------------------------
@@ -174,9 +173,9 @@ def test_refit_returns_weights_summing_to_one(monkeypatch) -> None:
     """The refit's output must be valid HRP weights (non-negative, sum to 1)."""
     # Stub out run_backtest to return predictable equity curves so we
     # don't run a real backtest in this unit test.
-    from datetime import date as date_type
-    from quant.config import DEFAULT_CONFIG_PATH, Config
     import yaml
+
+    from quant.config import DEFAULT_CONFIG_PATH, Config
 
     config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
 
@@ -225,8 +224,9 @@ def test_refit_returns_weights_summing_to_one(monkeypatch) -> None:
 def test_refit_falls_back_to_equal_weight_when_strategies_degenerate(monkeypatch) -> None:
     """If most strategies produce flat equity (never traded), HRP can't
     run; fall back to equal weights rather than zero out everything."""
-    from quant.config import DEFAULT_CONFIG_PATH, Config
     import yaml
+
+    from quant.config import DEFAULT_CONFIG_PATH, Config
 
     config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
 

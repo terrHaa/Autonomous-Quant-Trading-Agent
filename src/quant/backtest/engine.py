@@ -31,7 +31,6 @@ from quant.backtest.types import (
 )
 from quant.config import Config
 
-
 # ---------------------------------------------------------------------------
 # Output: the structured result of one backtest run.
 # ---------------------------------------------------------------------------
@@ -322,10 +321,10 @@ def _try_fill(
     try:
         o = opens.at[bar_date, order.symbol]
         h = highs.at[bar_date, order.symbol]
-        l = lows.at[bar_date, order.symbol]
+        lo = lows.at[bar_date, order.symbol]
     except KeyError:
         return None
-    if pd.isna(o) or pd.isna(h) or pd.isna(l):
+    if pd.isna(o) or pd.isna(h) or pd.isna(lo):
         return None
 
     # Branch by order type. Each branch sets `fill_price`, `spread_cost`,
@@ -345,7 +344,7 @@ def _try_fill(
     elif order.order_type == "limit":
         # Buy limit fills if today's low reached down to the limit;
         # sell limit fills if today's high reached up to the limit.
-        if order.side == "buy" and float(l) <= order.limit_price:
+        if order.side == "buy" and float(lo) <= order.limit_price:
             fill_price = float(order.limit_price)
         elif order.side == "sell" and float(h) >= order.limit_price:
             fill_price = float(order.limit_price)
@@ -361,7 +360,7 @@ def _try_fill(
         # Fills at the stop price — see gap-through caveat in the spec.
         if order.side == "buy" and float(h) >= order.stop_price:
             fill_price = float(order.stop_price)
-        elif order.side == "sell" and float(l) <= order.stop_price:
+        elif order.side == "sell" and float(lo) <= order.stop_price:
             fill_price = float(order.stop_price)
         else:
             return None

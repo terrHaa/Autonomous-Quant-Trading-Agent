@@ -29,12 +29,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from quant.execution.alpaca_executor import ExecutionReport
-
 
 # Project root → resolved from this file's location, mirroring config.py.
 # log.py at src/quant/agent/log.py → 4 parents up = repo root.
@@ -59,7 +58,7 @@ def save_daily_run(
 
     payload = {
         "date": run_date.isoformat(),
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
         "strategy_name": strategy_name,
         "strategy_params": strategy_params,
         "target_weights": dict(target_weights),

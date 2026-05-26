@@ -6,8 +6,6 @@ boundaries, OOS chaining math, and degenerate-input handling.
 
 from __future__ import annotations
 
-from datetime import date
-
 import pandas as pd
 import pytest
 
@@ -15,7 +13,6 @@ from quant.backtest.types import Snapshot
 from quant.config import DEFAULT_CONFIG_PATH, Config
 from quant.data.alpaca_client import BAR_COLUMNS
 from quant.evaluation.walk_forward import run_walk_forward
-
 
 # ---------------------------------------------------------------------------
 # Helpers

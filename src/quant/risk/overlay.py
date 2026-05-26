@@ -36,7 +36,6 @@ import pandas as pd
 
 from quant.config import Config
 
-
 # ---------------------------------------------------------------------------
 # OverlayAudit — what got clipped and why
 # ---------------------------------------------------------------------------

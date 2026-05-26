@@ -15,7 +15,6 @@ import pytest
 
 from quant.data.universe import Universe, _load_from_csv, load_universe
 
-
 # A tiny synthetic membership history. Chosen so each row exercises a
 # different membership-window case:
 #   - ALPHA:  always in (added long ago, never removed)

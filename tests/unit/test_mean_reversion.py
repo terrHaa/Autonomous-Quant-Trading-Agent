@@ -6,8 +6,6 @@ computable, then assert on the signal. Same approach as test_sma_crossover.
 
 from __future__ import annotations
 
-from datetime import date
-
 import pandas as pd
 import pytest
 

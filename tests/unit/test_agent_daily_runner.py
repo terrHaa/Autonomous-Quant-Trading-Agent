@@ -9,7 +9,7 @@ arguments.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,6 @@ from quant.execution.alpaca_executor import (
     ProposedOrder,
     SubmittedOrder,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -81,7 +80,7 @@ class _FakeExecutor:
             ))
         return ExecutionReport(
             env="paper",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             account_equity_before=100_000.0,
             positions_before=dict(self._positions),
             target_weights=dict(kwargs["target_weights"]),
@@ -236,7 +235,7 @@ def test_run_daily_report_emails_the_persisted_log(tmp_path: Path) -> None:
     # Pre-populate one day's record via the same save function.
     fake_exec_report = ExecutionReport(
         env="paper",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         account_equity_before=100_000.0,
         positions_before={},
         target_weights={"AAPL": 0.1, "MSFT": 0.1},

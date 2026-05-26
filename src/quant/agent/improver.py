@@ -15,9 +15,10 @@ Once a month (called by ``monthly_review.py``):
      trial population so the multi-testing inflation is corrected)
 4. If multiple pass, pick the highest-Sharpe one.
 5. Return an ``ImprovementResult`` describing what happened. The caller
-   (``monthly_review.py``) decides whether to ``save_params`` based on
-   the result — keeping the apply decision out of the search logic
-   makes the search testable in isolation.
+   (``monthly_review.py``) decides whether to write the winning params
+   into ``EnsembleState`` based on the result — keeping the apply
+   decision out of the search logic makes the search testable in
+   isolation.
 
 Known limitation (v1)
 ---------------------
@@ -32,8 +33,8 @@ operator interprets the numbers correctly.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import pandas as pd
 
@@ -46,7 +47,6 @@ from quant.evaluation.dsr import (
 )
 from quant.evaluation.metrics import metrics_for
 from quant.strategies import CrossSectionalMomentum
-
 
 logger = logging.getLogger(__name__)
 

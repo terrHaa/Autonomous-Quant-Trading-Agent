@@ -11,7 +11,6 @@ import pytest
 
 from quant.agent.email_sender import EmailConfig, EmailSender
 
-
 # ---------------------------------------------------------------------------
 # Fake SMTP client
 # ---------------------------------------------------------------------------

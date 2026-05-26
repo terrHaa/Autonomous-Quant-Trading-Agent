@@ -113,7 +113,6 @@ def test_skip_period_is_excluded_from_signal_window() -> None:
     # 70 bars. SYM_A: ramps up 60 days, crashes last 5. SYM_B: ramps down
     # for 60 days, rallies last 5. With skip=5, SYM_A should still beat
     # SYM_B because we don't see the recent crash/rally.
-    n = 70
     sym_a_ramp = [100.0 + i for i in range(65)]               # 65 ramp days
     sym_a_crash = [sym_a_ramp[-1] * 0.5 for _ in range(5)]    # then halves
     sym_a = sym_a_ramp + sym_a_crash                          # 70 closes

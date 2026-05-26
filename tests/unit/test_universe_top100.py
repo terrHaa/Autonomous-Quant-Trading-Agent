@@ -7,8 +7,6 @@ CSV with a different schema.
 
 from __future__ import annotations
 
-import pytest
-
 from quant.data.universe import load_top100_snapshot
 
 

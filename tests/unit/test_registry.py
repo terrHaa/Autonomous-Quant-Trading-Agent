@@ -7,7 +7,6 @@ running the full engine on every test.
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +16,6 @@ import pytest
 from quant.backtest.engine import BacktestResult
 from quant.config import DEFAULT_CONFIG_PATH, Config
 from quant.registry import STAGES, Registry
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -121,7 +119,9 @@ def test_list_runs_filters_by_strategy_name(registry: Registry) -> None:
 
 def test_list_runs_filters_by_stage(registry: Registry) -> None:
     rid1 = registry.record(_make_result("A", seed=1))
-    rid2 = registry.record(_make_result("B", seed=2))
+    # rid2 stays in "research" — exists so list_runs(stage="research")
+    # has something to filter to (covered by other tests).
+    registry.record(_make_result("B", seed=2))
     registry.promote(rid1, to_stage="walk_forward")
 
     wf = registry.list_runs(stage="walk_forward")

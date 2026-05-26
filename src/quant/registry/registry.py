@@ -37,10 +37,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
 import pandas as pd
 
@@ -50,7 +51,6 @@ from quant.evaluation.dsr import (
     estimate_var_sr_from_trials,
 )
 from quant.evaluation.metrics import metrics_for
-
 
 # The promotion ladder. A run starts at the leftmost stage and can only
 # move rightward; "research → live" without intermediate stages is forbidden.
@@ -144,7 +144,7 @@ class Registry:
 
         metrics = metrics_for(result)
         run_id = str(uuid.uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         with self._conn() as conn:
             conn.execute(

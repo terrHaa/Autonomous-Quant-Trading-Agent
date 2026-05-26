@@ -68,7 +68,11 @@ def test_credentials_are_frozen() -> None:
     account — `frozen=True` on the dataclass makes that an error.
     """
     creds = AlpacaCredentials(api_key="k", api_secret="s")
-    with pytest.raises(Exception):  # FrozenInstanceError is a TypeError subclass
+    # `dataclasses.FrozenInstanceError` is the precise type; it inherits
+    # from AttributeError. Be specific so the test doesn't pass on an
+    # unrelated exception.
+    from dataclasses import FrozenInstanceError
+    with pytest.raises(FrozenInstanceError):
         creds.api_key = "different"  # type: ignore[misc]
 
 

@@ -40,9 +40,10 @@ the underlying Alpaca client, so callers can swap them transparently:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Protocol
 
 import pandas as pd
 

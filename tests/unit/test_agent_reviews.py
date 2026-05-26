@@ -6,16 +6,15 @@ outside ``tmp_path`` are touched.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from quant.agent import monthly_review as monthly_mod
 from quant.agent import weekly_review as weekly_mod
 from quant.agent.log import save_daily_run
-from quant.agent.params import StrategyParams, load_params, save_params
+from quant.agent.params import StrategyParams
 from quant.execution.alpaca_executor import (
     ExecutionReport,
     SubmittedOrder,
@@ -36,7 +35,7 @@ class _RecordingEmail:
 def _save_daily(tmp_path: Path, d: date, equity: float = 100_000.0) -> None:
     """Helper: persist a minimal daily run record."""
     rep = ExecutionReport(
-        env="paper", timestamp=datetime.now(timezone.utc),
+        env="paper", timestamp=datetime.now(UTC),
         account_equity_before=equity, positions_before={},
         target_weights={}, proposed_orders=[],
         submitted_orders=[
@@ -90,7 +89,6 @@ def test_weekly_review_still_emails_when_no_runs(tmp_path: Path) -> None:
 def test_weekly_review_refits_hrp_when_enabled(monkeypatch, tmp_path: Path) -> None:
     """With refit_hrp=True and a mocked refit, the new weights must be
     persisted to disk and the email body must surface the change."""
-    from quant.agent import ensemble as ensemble_mod
     from quant.agent import weekly_review as weekly_module
 
     # Pre-save baseline ensemble state.
@@ -200,7 +198,7 @@ def test_monthly_review_auto_apply_persists_new_params_when_gates_pass(
     """When the improver returns a winner AND auto_apply=True, the
     new xsec params must be saved into the EnsembleState file (and the
     other strategies' params plus the HRP weights must be PRESERVED)."""
-    from quant.agent.ensemble import EnsembleState, load_ensemble_state
+    from quant.agent.ensemble import load_ensemble_state
     from quant.agent.improver import (
         ImprovementCandidate,
         ImprovementResult,

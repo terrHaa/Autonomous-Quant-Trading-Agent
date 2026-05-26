@@ -22,7 +22,6 @@ from typing import Literal, Protocol
 
 import pandas as pd
 
-
 # ---------------------------------------------------------------------------
 # Type aliases. Centralizing these makes it easy to change the order-side
 # representation (e.g., add 'short_open' / 'short_close' for borrow tracking)

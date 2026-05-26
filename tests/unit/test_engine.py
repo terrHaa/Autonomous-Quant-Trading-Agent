@@ -12,17 +12,13 @@ Without those two passing, nothing else in this file matters.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from quant.backtest import BacktestResult, OrderIntent, Snapshot, run_backtest
-from quant.config import DEFAULT_CONFIG_PATH, Config, load_config
+from quant.config import DEFAULT_CONFIG_PATH, Config
 from quant.data.alpaca_client import BAR_COLUMNS
-
 
 # ----------------------------------------------------------------------------
 # Helpers — build small bars frames and configs for deterministic tests.

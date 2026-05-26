@@ -28,16 +28,15 @@ backtests you'd want a paid subscription (SIP feed) — out of scope for now.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Iterable
+from datetime import UTC, date, datetime
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
-
 
 # The exact columns and order we promise to return. Downstream code (cache,
 # integrity checks, backtest engine) can rely on this contract — it's part
@@ -164,8 +163,8 @@ class AlpacaDataClient:
         request = StockBarsRequest(
             symbol_or_symbols=symbols,
             timeframe=TimeFrame.Day,
-            start=datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
-            end=datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+            start=datetime.combine(start, datetime.min.time(), tzinfo=UTC),
+            end=datetime.combine(end, datetime.max.time(), tzinfo=UTC),
             # 'all' = adjust for both splits and dividends. The other options
             # are 'raw', 'split', and 'dividend' — we don't use them, but if
             # you ever need raw prices for corporate-action analysis, this is

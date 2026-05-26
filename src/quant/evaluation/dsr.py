@@ -28,7 +28,6 @@ from scipy.stats import kurtosis, norm, skew
 
 from quant.backtest.engine import BacktestResult
 
-
 # Euler-Mascheroni constant — used in the expected-max-of-N asymptotic.
 # Defined here once with full precision to avoid drift.
 _EULER_MASCHERONI = 0.5772156649015329

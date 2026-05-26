@@ -32,8 +32,6 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import (
     EnsembleState,
@@ -52,8 +50,7 @@ from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top100_snapshot
-from quant.execution.alpaca_executor import AlpacaExecutor, ExecutionReport
-
+from quant.execution.alpaca_executor import AlpacaExecutor
 
 logger = logging.getLogger(__name__)
 

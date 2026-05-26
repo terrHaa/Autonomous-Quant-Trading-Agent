@@ -20,10 +20,8 @@ Design notes
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pandas as pd
 
 from quant.backtest.engine import BacktestResult
 from quant.evaluation.metrics import Metrics, metrics_for
@@ -212,7 +210,7 @@ def _render_top_fills(result: BacktestResult, *, n: int) -> str:
 
 
 def _render_footer() -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     return f"---\n\n_Generated {now} by `quant.reports.tearsheet`._"
 
 

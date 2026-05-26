@@ -29,7 +29,6 @@ import math
 
 import pandas as pd
 
-
 # A small floor below which we treat realized vol as zero — same idea as
 # the dsr.py guard against pandas's near-zero std on near-constant inputs.
 _VOL_FLOOR = 1e-12

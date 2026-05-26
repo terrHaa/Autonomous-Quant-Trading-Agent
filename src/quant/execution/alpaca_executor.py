@@ -39,12 +39,11 @@ What this is NOT (yet)
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 from quant.data.alpaca_client import AlpacaCredentials
-
 
 Env = Literal["paper", "live"]
 
@@ -256,7 +255,7 @@ class AlpacaExecutor:
         # ---- 1. Snapshot account + positions ---------------------------
         equity = self.get_equity()
         positions = self.get_positions()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # ---- 2. Compute proposed orders --------------------------------
         proposed = _compute_proposed_orders(
@@ -394,7 +393,7 @@ class AlpacaExecutor:
 
         equity = self.get_equity()
         positions = self.get_positions()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         submitted: list[SubmittedOrder] = []
         max_notional = max_position_weight * equity
 

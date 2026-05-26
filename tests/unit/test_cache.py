@@ -8,15 +8,14 @@ arguments, which is the whole point of a cache.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
 from quant.data.alpaca_client import BAR_COLUMNS, _empty_bars_frame
 from quant.data.cache import BarsCache
-
 
 # ----------------------------------------------------------------------------
 # Test double: a fake BarsProvider that records its calls and returns

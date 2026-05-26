@@ -7,7 +7,6 @@ equality, which would break on harmless whitespace/format tweaks.
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 import numpy as np

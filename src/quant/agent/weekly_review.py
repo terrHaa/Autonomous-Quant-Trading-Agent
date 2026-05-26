@@ -39,7 +39,6 @@ from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top100_snapshot
 
-
 logger = logging.getLogger(__name__)
 
 

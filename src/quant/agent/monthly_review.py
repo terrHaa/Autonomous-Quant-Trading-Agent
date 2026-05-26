@@ -6,8 +6,9 @@ the weekly review does, PLUS:
 - Backtests a small grid of candidate strategy parameters.
 - Applies three safety gates (Sharpe up, drawdown not worse,
   DSR ≥ 0.95 vs trial population).
-- If a candidate passes all gates, **automatically saves** it via
-  ``save_params`` — the daily runner picks it up next session.
+- If a candidate passes all gates, **automatically writes** the new
+  xsec params into the ``EnsembleState`` on disk (preserving the
+  SMA + MR + HRP layers). The daily runner picks it up next session.
 - Emails the operator the full result (candidates considered, gates
   passed/failed, what (if anything) was applied).
 
@@ -43,7 +44,6 @@ from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top100_snapshot
-
 
 logger = logging.getLogger(__name__)
 

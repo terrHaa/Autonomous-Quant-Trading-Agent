@@ -8,8 +8,6 @@ last-decimal values. Behavioral tests are robust to those differences.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -20,7 +18,6 @@ from quant.evaluation.dsr import (
     estimate_var_sr_from_trials,
     probabilistic_sharpe_ratio,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

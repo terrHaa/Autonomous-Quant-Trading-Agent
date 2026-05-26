@@ -25,7 +25,6 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 # Path to the project root, computed from this file's location.
 # This file lives at `src/quant/config.py`, so the project root is three
 # parents up: src/quant -> src -> <project root>.

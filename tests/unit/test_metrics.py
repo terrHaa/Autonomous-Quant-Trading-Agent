@@ -12,7 +12,7 @@ import math
 import pandas as pd
 import pytest
 
-from quant.evaluation.metrics import Metrics, compute_metrics
+from quant.evaluation.metrics import compute_metrics
 
 
 def _equity_from_returns(returns: list[float], start: float = 1_000_000) -> pd.Series:
