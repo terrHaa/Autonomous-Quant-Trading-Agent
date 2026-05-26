@@ -158,6 +158,31 @@ def _load_from_csv(name: str, csv_path: Path) -> Universe:
     return Universe(name=name, _table=df)
 
 
+def load_top100_snapshot() -> list[str]:
+    """Load the top-100 S&P 500 snapshot used by the autonomous agent.
+
+    Unlike :func:`load_universe`, this is NOT a point-in-time membership
+    history — it's a *static snapshot* of "the names we're allowed to
+    trade this quarter." Refresh the CSV at ``reference/universe/
+    sp500_top100.csv`` from a current market-cap ranking each quarter.
+
+    Returns the symbols as a list, uppercased and deduped (insertion
+    order preserved).
+    """
+    csv_path = _REFERENCE_DIR / "sp500_top100.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Top-100 snapshot CSV not found at {csv_path}. "
+            "Run from the source tree, or refresh the snapshot per "
+            "reference/README.md."
+        )
+    df = pd.read_csv(csv_path, comment="#")
+    if "symbol" not in df.columns:
+        raise ValueError(f"{csv_path.name} must have a 'symbol' column")
+    # dict.fromkeys preserves order while dropping duplicates.
+    return list(dict.fromkeys(s.upper().strip() for s in df["symbol"]))
+
+
 def _validate_membership_table(df: pd.DataFrame, csv_path: Path) -> None:
     """Fail loudly if the membership CSV is structurally wrong."""
     required = {"symbol", "added", "removed"}

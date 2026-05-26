@@ -18,9 +18,13 @@ Currently available:
 - ``MeanReversion`` — short-term reversion (Lehmann 1990 single-name
   version). Roughly anti-correlated with momentum on a per-name basis;
   built second so HRP (Step 17) has uncorrelated streams to allocate.
+- ``CrossSectionalMomentum`` — daily-rebalanced top-K momentum across a
+  universe; the workhorse for the autonomous agent. Skip-month
+  formulation (60-day lookback, 5-day skip) follows Jegadeesh-Titman.
 """
 
+from quant.strategies.cross_sectional_momentum import CrossSectionalMomentum
 from quant.strategies.mean_reversion import MeanReversion
 from quant.strategies.sma_crossover import SmaCrossover
 
-__all__ = ["MeanReversion", "SmaCrossover"]
+__all__ = ["CrossSectionalMomentum", "MeanReversion", "SmaCrossover"]
