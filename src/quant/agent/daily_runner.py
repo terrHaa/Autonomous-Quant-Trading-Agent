@@ -35,12 +35,17 @@ from typing import Any
 import pandas as pd
 
 from quant.agent.email_sender import EmailSender
+from quant.agent.ensemble import (
+    EnsembleState,
+    build_strategies,
+    compute_ensemble_targets,
+    load_ensemble_state,
+)
 from quant.agent.log import (
     DEFAULT_RUNS_DIR,
     load_daily_run,
     save_daily_run,
 )
-from quant.agent.params import StrategyParams, load_params
 from quant.agent.reports import render_daily_report
 from quant.backtest.types import Snapshot
 from quant.config import Config, load_config
@@ -48,7 +53,6 @@ from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top100_snapshot
 from quant.execution.alpaca_executor import AlpacaExecutor, ExecutionReport
-from quant.strategies import CrossSectionalMomentum
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +84,7 @@ def run_daily_trade(
     cache: BarsCache | None = None,
     executor: AlpacaExecutor | None = None,
     runs_dir: Path | None = None,
-    params: StrategyParams | None = None,
+    ensemble_state: EnsembleState | None = None,
 ) -> Path:
     """Execute today's trade cycle. Returns the path of the saved JSON log.
 
@@ -101,21 +105,19 @@ def run_daily_trade(
     universe = universe or load_top100_snapshot()
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
-    params = params or load_params()
+    state = ensemble_state or load_ensemble_state()
 
     logger.info(
         "run_daily_trade: today=%s dry_run=%s universe_size=%d env=%s "
-        "params=%s",
-        today, dry_run, len(universe), executor.env, params,
+        "hrp_weights=%s",
+        today, dry_run, len(universe), executor.env, state.hrp_weights,
     )
 
-    # --- 1. Fetch bars covering the signal window ---
-    # We need at least lookback + skip bars of history. Fetch
-    # extra calendar days to be safe (non-trading days, holidays).
+    # --- 1. Fetch bars covering the longest signal window ---
+    # SMA(50,200) needs the most history; budget 250 trading days + buffer
+    # so all three strategies have what they need.
     end = today - timedelta(days=1)   # don't request today's bar (not closed yet)
-    start = end - timedelta(
-        days=params.lookback + params.skip + LOOKBACK_BUFFER_DAYS + 30
-    )
+    start = end - timedelta(days=400)
     bars = cache.get_daily_bars(universe, start, end)
     if bars.empty:
         raise RuntimeError(
@@ -123,21 +125,16 @@ def run_daily_trade(
             f"between {start} and {end}. Cache or Alpaca issue?"
         )
 
-    # --- 2. Build snapshot, run the strategy ---
-    # as_of = the LATEST date with bars in the frame (typically end, but
-    # could be earlier if today is right after a long weekend etc.)
+    # --- 2. Build snapshot, run ALL strategies, combine via HRP weights ---
     ts = bars.index.get_level_values("timestamp")
     as_of = ts.max().date()
     snapshot = Snapshot.from_full_bars(bars, as_of=as_of)
-    strategy = CrossSectionalMomentum(
-        universe,
-        lookback=params.lookback,
-        skip=params.skip,
-        top_k=params.top_k,
+    strategies = build_strategies(state, universe)
+    target_weights = compute_ensemble_targets(
+        strategies, state.hrp_weights, snapshot,
     )
-    target_weights = strategy.on_bar(snapshot)
     logger.info(
-        "strategy emitted %d target positions (as_of=%s)",
+        "ensemble emitted %d target positions (as_of=%s)",
         len(target_weights), as_of,
     )
 
@@ -183,13 +180,25 @@ def run_daily_trade(
     )
 
     # --- 5. Persist the full record. ---
+    # Ensemble means there's no single "strategy" — record the names of
+    # all three plus their HRP weights, so the daily report and reviews
+    # can show what was active and how.
     path = save_daily_run(
         run_date=today,
-        strategy_name=strategy.name,
+        strategy_name=f"ensemble({len(strategies)})",
         strategy_params={
-            "lookback": params.lookback,
-            "skip": params.skip,
-            "top_k": params.top_k,
+            "ensemble_state": {
+                "sma_fast": state.sma_fast,
+                "sma_slow": state.sma_slow,
+                "mr_lookback": state.mr_lookback,
+                "mr_threshold_pct": state.mr_threshold_pct,
+                "mr_allow_short": state.mr_allow_short,
+                "xsec_top_k": state.xsec_top_k,
+                "xsec_lookback": state.xsec_lookback,
+                "xsec_skip": state.xsec_skip,
+                "hrp_weights": state.hrp_weights,
+                "last_hrp_refit_date": state.last_hrp_refit_date,
+            },
             "stop_loss_pct": STOP_LOSS_PCT,
             "max_position_weight": MAX_POSITION_WEIGHT,
         },
