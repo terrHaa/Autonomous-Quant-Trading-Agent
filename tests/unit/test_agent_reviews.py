@@ -198,7 +198,9 @@ def test_monthly_review_auto_apply_persists_new_params_when_gates_pass(
     monkeypatch, tmp_path: Path,
 ) -> None:
     """When the improver returns a winner AND auto_apply=True, the
-    new params must be saved to disk."""
+    new xsec params must be saved into the EnsembleState file (and the
+    other strategies' params plus the HRP weights must be PRESERVED)."""
+    from quant.agent.ensemble import EnsembleState, load_ensemble_state
     from quant.agent.improver import (
         ImprovementCandidate,
         ImprovementResult,
@@ -217,34 +219,41 @@ def test_monthly_review_auto_apply_persists_new_params_when_gates_pass(
         current=current, candidates=[current, winner],
         best_passing=winner, reason="DSR 0.99 >= 0.95",
     )
-
     monkeypatch.setattr(
         monthly_mod, "search_improvements",
         lambda *a, **kw: fake_result,
     )
 
-    # Cache must return non-empty so the improver is invoked.
     class _FakeCache:
         def get_daily_bars(self, *a, **kw):
-            return pd.DataFrame({"close": [1, 2, 3]})   # non-empty
-    sender = _RecordingEmail()
-    params_path = tmp_path / "params.json"
+            return pd.DataFrame({"close": [1, 2, 3]})
 
-    _save_daily(tmp_path, date(2024, 6, 28))   # at least one run for content
+    sender = _RecordingEmail()
+    state_path = tmp_path / "ensemble_state.json"
+    _save_daily(tmp_path, date(2024, 6, 28))
 
     monthly_mod.run_monthly_review(
         for_date=date(2024, 6, 28),
         runs_dir=tmp_path,
         email_sender=sender,
         cache=_FakeCache(),
-        universe=["AAPL"],
+        universe=[f"S{i}" for i in range(10)],
         auto_apply=True,
-        params_path=params_path,
+        params_path=state_path,
     )
 
-    # The new params should have been persisted.
-    loaded = load_params(path=params_path)
-    assert loaded == new_params
+    # The new xsec params should be on the ensemble state; other fields
+    # should be at their default values (untouched).
+    loaded = load_ensemble_state(path=state_path)
+    assert loaded.xsec_top_k == 5
+    assert loaded.xsec_lookback == 120
+    assert loaded.xsec_skip == 5
+    # Untouched strategies' params remain at defaults.
+    assert loaded.sma_fast == 50
+    assert loaded.sma_slow == 200
+    assert loaded.mr_lookback == 5
+    # HRP weights preserved (defaults, since no refit ran in this test).
+    assert abs(sum(loaded.hrp_weights.values()) - 1.0) < 1e-9
     # Email body should mention the apply.
     assert "APPLIED" in sender.sent[0]["body_text"]
 

@@ -27,12 +27,17 @@ from pathlib import Path
 
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
+from quant.agent.ensemble import (
+    EnsembleState,
+    load_ensemble_state,
+    save_ensemble_state,
+)
 from quant.agent.improver import (
     ImprovementResult,
     search_improvements,
 )
 from quant.agent.log import DEFAULT_RUNS_DIR, load_daily_run
-from quant.agent.params import StrategyParams, load_params, save_params
+from quant.agent.params import StrategyParams
 from quant.agent.reports import render_monthly_report
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
@@ -84,7 +89,15 @@ def run_monthly_review(
             equity_curve[d] = float(eq)
 
     # -------- 2. Improver step --------
-    current_params = load_params(path=params_path)
+    # Load EnsembleState. The improver currently tunes only the
+    # cross-sectional momentum sub-strategy; SMA + MR tuning is a future
+    # extension. The weekly HRP refit handles the strategy-mix layer.
+    current_state = load_ensemble_state(path=params_path)
+    current_xsec_params = StrategyParams(
+        top_k=current_state.xsec_top_k,
+        lookback=current_state.xsec_lookback,
+        skip=current_state.xsec_skip,
+    )
     universe = universe or load_top100_snapshot()
     improvement_result: ImprovementResult | None = None
     recommendations: list[str] = []
@@ -102,7 +115,7 @@ def run_monthly_review(
             )
         else:
             improvement_result = search_improvements(
-                current_params,
+                current_xsec_params,
                 universe=universe,
                 bars=bars,
                 config=config,
@@ -118,19 +131,35 @@ def run_monthly_review(
                 )
             else:
                 if auto_apply:
-                    save_params(best.params, path=params_path)
+                    # Persist the winning xsec params back into the
+                    # ensemble state (keep the SMA, MR, and HRP weights
+                    # untouched — those are managed elsewhere).
+                    new_state = EnsembleState(
+                        sma_fast=current_state.sma_fast,
+                        sma_slow=current_state.sma_slow,
+                        mr_lookback=current_state.mr_lookback,
+                        mr_threshold_pct=current_state.mr_threshold_pct,
+                        mr_allow_short=current_state.mr_allow_short,
+                        xsec_top_k=best.params.top_k,
+                        xsec_lookback=best.params.lookback,
+                        xsec_skip=best.params.skip,
+                        hrp_weights=current_state.hrp_weights,
+                        last_hrp_refit_date=current_state.last_hrp_refit_date,
+                    )
+                    save_ensemble_state(new_state, path=params_path)
                     recommendations.append(
-                        f"**APPLIED** new params: top_k={best.params.top_k}, "
-                        f"lookback={best.params.lookback}, skip={best.params.skip}. "
-                        f"Previous: top_k={current_params.top_k}, "
-                        f"lookback={current_params.lookback}, "
-                        f"skip={current_params.skip}. "
+                        f"**APPLIED** xsec momentum params: "
+                        f"top_k={best.params.top_k}, "
+                        f"lookback={best.params.lookback}, "
+                        f"skip={best.params.skip}. "
+                        f"Previous: top_k={current_xsec_params.top_k}, "
+                        f"lookback={current_xsec_params.lookback}, "
+                        f"skip={current_xsec_params.skip}. "
                         f"Gate reason: {improvement_result.reason}"
                     )
                 else:
                     recommendations.append(
                         f"Candidate passes all gates but auto-apply is off. "
-                        f"Run `save_params(...)` manually to switch. "
                         f"Candidate: top_k={best.params.top_k}, "
                         f"lookback={best.params.lookback}, "
                         f"skip={best.params.skip}."
