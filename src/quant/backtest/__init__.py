@@ -19,6 +19,8 @@ consumes.
 Public surface (strategy authors mostly need these two):
 """
 
+from quant.backtest.engine import BacktestResult, run_backtest
+from quant.backtest.portfolio import Portfolio
 from quant.backtest.types import (
     Fill,
     Order,
@@ -26,11 +28,12 @@ from quant.backtest.types import (
     OrderType,
     Side,
     Snapshot,
+    Strategy,
     TimeInForce,
 )
-from quant.backtest.portfolio import Portfolio
 
 __all__ = [
+    "BacktestResult",
     "Fill",
     "Order",
     "OrderIntent",
@@ -38,5 +41,7 @@ __all__ = [
     "Portfolio",
     "Side",
     "Snapshot",
+    "Strategy",
     "TimeInForce",
+    "run_backtest",
 ]

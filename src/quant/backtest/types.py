@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import Literal, Protocol
 
 import pandas as pd
 
@@ -207,3 +207,39 @@ class Fill:
     spread_cost: float            # half-spread component
     slippage_cost: float          # impact / adverse-selection component
     commission: float             # broker commission
+
+
+# ---------------------------------------------------------------------------
+# Strategy Protocol — the contract any strategy must satisfy to be runnable
+# by the engine. Defined here because it's strategy-facing (alongside
+# Snapshot and OrderIntent); the engine itself just imports it.
+# ---------------------------------------------------------------------------
+
+
+class Strategy(Protocol):
+    """What the engine expects from any strategy.
+
+    Implement as a class (so ``name`` can be a class attribute and on_bar
+    can carry state) or a plain object with the matching shape.
+
+    Example::
+
+        class BuyAndHoldSPY:
+            name = "buy_and_hold_spy"
+
+            def on_bar(self, snapshot):
+                return {"SPY": 1.0}  # 100% in SPY at all times
+    """
+
+    name: str
+
+    def on_bar(self, snapshot: Snapshot) -> dict[str, float | OrderIntent]:
+        """Return desired per-symbol intent for the next bar's orders.
+
+        - Float values become market-on-open orders at the next bar.
+        - OrderIntent values can specify limit/stop semantics.
+        - Symbols held but not in the returned dict are flatted at market.
+
+        Implementation must be pure: no side effects, no network/file IO,
+        no time-of-day reads. Otherwise the engine can't promise determinism.
+        """
