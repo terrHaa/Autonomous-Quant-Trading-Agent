@@ -16,5 +16,12 @@ Default pipeline:
 The allocator output is *proposed* weights. The risk overlay
 (`quant.risk`) is the final arbiter before orders go out.
 
+Currently available:
+- ``hrp_weights`` — Hierarchical Risk Parity (López de Prado 2016).
+
 See docs/specs/hrp.md for the HRP construction details.
 """
+
+from quant.allocator.hrp import hrp_weights
+
+__all__ = ["hrp_weights"]
