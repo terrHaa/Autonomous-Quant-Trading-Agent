@@ -40,6 +40,7 @@ from quant.agent.log import (
     load_daily_run,
     save_daily_run,
 )
+from quant.agent.params import StrategyParams, load_params
 from quant.agent.reports import render_daily_report
 from quant.backtest.types import Snapshot
 from quant.config import Config, load_config
@@ -53,16 +54,16 @@ from quant.strategies import CrossSectionalMomentum
 logger = logging.getLogger(__name__)
 
 
-# Agent-level constants — operator's rules, hard-coded. These are NOT in
-# the YAML config because they're the *agent's* contract, not the
-# backtester's. The YAML config covers backtest defaults; the agent
-# enforces these regardless of what gets put in YAML.
+# OPERATOR'S HARD RULES — hard-coded here, deliberately NOT in YAML and
+# NOT in the tunable StrategyParams file. The auto-improver cannot
+# change these. If you want to change them, edit the source.
 STOP_LOSS_PCT = 0.05            # 5% stop on every entry
 MAX_POSITION_WEIGHT = 0.20      # 20% per-trade cap
-TOP_K = 10                      # 10 names = 10% each, well under the 20% cap
-LOOKBACK_DAYS = 60
-SKIP_DAYS = 5
-LOOKBACK_BUFFER_DAYS = 30       # extra bars fetched to cover non-trading days
+
+# Tunable parameters live in StrategyParams (persisted to
+# data/agent/strategy_params.json); the auto-improver may swap them
+# after passing safety gates. Defaults are the v1 starting point.
+LOOKBACK_BUFFER_DAYS = 30       # extra bars to cover non-trading days
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,7 @@ def run_daily_trade(
     cache: BarsCache | None = None,
     executor: AlpacaExecutor | None = None,
     runs_dir: Path | None = None,
+    params: StrategyParams | None = None,
 ) -> Path:
     """Execute today's trade cycle. Returns the path of the saved JSON log.
 
@@ -99,18 +101,20 @@ def run_daily_trade(
     universe = universe or load_top100_snapshot()
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
+    params = params or load_params()
 
     logger.info(
-        "run_daily_trade: today=%s dry_run=%s universe_size=%d env=%s",
-        today, dry_run, len(universe), executor.env,
+        "run_daily_trade: today=%s dry_run=%s universe_size=%d env=%s "
+        "params=%s",
+        today, dry_run, len(universe), executor.env, params,
     )
 
     # --- 1. Fetch bars covering the signal window ---
-    # We need at least LOOKBACK_DAYS + SKIP_DAYS bars of history. Fetch
+    # We need at least lookback + skip bars of history. Fetch
     # extra calendar days to be safe (non-trading days, holidays).
     end = today - timedelta(days=1)   # don't request today's bar (not closed yet)
     start = end - timedelta(
-        days=LOOKBACK_DAYS + SKIP_DAYS + LOOKBACK_BUFFER_DAYS + 30
+        days=params.lookback + params.skip + LOOKBACK_BUFFER_DAYS + 30
     )
     bars = cache.get_daily_bars(universe, start, end)
     if bars.empty:
@@ -127,9 +131,9 @@ def run_daily_trade(
     snapshot = Snapshot.from_full_bars(bars, as_of=as_of)
     strategy = CrossSectionalMomentum(
         universe,
-        lookback=LOOKBACK_DAYS,
-        skip=SKIP_DAYS,
-        top_k=TOP_K,
+        lookback=params.lookback,
+        skip=params.skip,
+        top_k=params.top_k,
     )
     target_weights = strategy.on_bar(snapshot)
     logger.info(
@@ -183,9 +187,9 @@ def run_daily_trade(
         run_date=today,
         strategy_name=strategy.name,
         strategy_params={
-            "lookback": LOOKBACK_DAYS,
-            "skip": SKIP_DAYS,
-            "top_k": TOP_K,
+            "lookback": params.lookback,
+            "skip": params.skip,
+            "top_k": params.top_k,
             "stop_loss_pct": STOP_LOSS_PCT,
             "max_position_weight": MAX_POSITION_WEIGHT,
         },

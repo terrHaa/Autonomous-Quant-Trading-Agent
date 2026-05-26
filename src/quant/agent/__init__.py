@@ -18,8 +18,22 @@ tweaks. See docs/specs/ for design details (TBD).
 
 Currently available:
 - ``EmailSender`` — SMTP wrapper for the report-out path.
+- ``StrategyParams`` + ``load_params`` / ``save_params`` — tunable
+  strategy parameters the auto-improver may swap.
+- ``ImprovementResult`` from ``improver`` — what the monthly review
+  searched and decided.
 """
 
 from quant.agent.email_sender import EmailConfig, EmailSender
+from quant.agent.improver import ImprovementCandidate, ImprovementResult
+from quant.agent.params import StrategyParams, load_params, save_params
 
-__all__ = ["EmailConfig", "EmailSender"]
+__all__ = [
+    "EmailConfig",
+    "EmailSender",
+    "ImprovementCandidate",
+    "ImprovementResult",
+    "StrategyParams",
+    "load_params",
+    "save_params",
+]
