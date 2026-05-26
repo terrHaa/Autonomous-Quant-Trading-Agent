@@ -64,8 +64,10 @@ def test_weekly_review_emails_when_runs_exist(tmp_path: Path) -> None:
         _save_daily(tmp_path, base - pd.Timedelta(days=offset).to_pytimedelta())
 
     sender = _RecordingEmail()
+    # refit_hrp=False so we don't hit Alpaca during unit tests.
     subject = weekly_mod.run_weekly_review(
         for_date=base, runs_dir=tmp_path, email_sender=sender,
+        refit_hrp=False,
     )
     assert len(sender.sent) == 1
     assert "weekly review" in subject
@@ -78,10 +80,81 @@ def test_weekly_review_still_emails_when_no_runs(tmp_path: Path) -> None:
     sender = _RecordingEmail()
     weekly_mod.run_weekly_review(
         for_date=date(2024, 6, 7), runs_dir=tmp_path, email_sender=sender,
+        refit_hrp=False,
     )
     assert len(sender.sent) == 1
     # No-data note should appear in the body.
     assert "no daily run" in sender.sent[0]["body_text"].lower()
+
+
+def test_weekly_review_refits_hrp_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    """With refit_hrp=True and a mocked refit, the new weights must be
+    persisted to disk and the email body must surface the change."""
+    from quant.agent import ensemble as ensemble_mod
+    from quant.agent import weekly_review as weekly_module
+
+    # Pre-save baseline ensemble state.
+    from quant.agent.ensemble import (
+        EnsembleState,
+        load_ensemble_state,
+        save_ensemble_state,
+    )
+    state_path = tmp_path / "state.json"
+    save_ensemble_state(EnsembleState(), path=state_path)
+
+    # Mock refit_hrp_weights to return a deliberately new allocation.
+    new_weights = {
+        "sma_crossover_50_200": 0.6,
+        "mean_reversion_5_200bp": 0.1,
+        "xsec_momo_60_5_10": 0.3,
+    }
+    monkeypatch.setattr(
+        weekly_module, "refit_hrp_weights",
+        lambda *a, **kw: (
+            new_weights,
+            {
+                "per_strategy": {
+                    "sma_crossover_50_200": {
+                        "total_return": 0.12, "sharpe": 0.8, "n_days": 250,
+                    },
+                    "mean_reversion_5_200bp": {
+                        "total_return": -0.03, "sharpe": -0.2, "n_days": 250,
+                    },
+                    "xsec_momo_60_5_10": {
+                        "total_return": 0.20, "sharpe": 1.1, "n_days": 250,
+                    },
+                },
+                "hrp_weights_before": {},
+                "hrp_weights_after": new_weights,
+            },
+        ),
+    )
+
+    # Provide a cache stub that returns non-empty bars (so the refit branch runs).
+    class _FakeCache:
+        def get_daily_bars(self, *a, **kw):
+            return pd.DataFrame({"close": [1, 2, 3]})
+
+    _save_daily(tmp_path, date(2024, 6, 7))   # at least one daily run
+
+    sender = _RecordingEmail()
+    weekly_module.run_weekly_review(
+        for_date=date(2024, 6, 7),
+        runs_dir=tmp_path,
+        email_sender=sender,
+        state_path=state_path,
+        cache=_FakeCache(),
+        universe=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+    )
+
+    # The new weights must have landed on disk.
+    loaded = load_ensemble_state(path=state_path)
+    assert loaded.hrp_weights == new_weights
+    assert loaded.last_hrp_refit_date == "2024-06-07"
+    # The email body must surface the change.
+    body = sender.sent[0]["body_text"]
+    assert "HRP weights" in body
+    assert "sma_crossover_50_200" in body
 
 
 # ---------------------------------------------------------------------------
