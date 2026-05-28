@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily AUDIT job: end-of-trading-day pipeline health check.
+
+  Verifies for the previous trading day:
+    1. Today's daily-run JSON exists and is well-formed.
+    2. Broker state matches the run record (positions ↔ GTC stops,
+       no orphans, no unprotected, no quantity mismatches, account
+       not blocked).
+    3. EnsembleState integrity (HRP weights sum to 1, strategies
+       buildable, AI strategy files exist on disk).
+    4. No recent non-empty .err logs from the other launchd jobs.
+    5. Broker reachability.
+
+  Emails a green-banner summary on pass, red-banner with full details
+  on any failure. Exit code reflects pass/fail so launchd's job-status
+  view mirrors pipeline health.
+
+  Mac is on CST (+0800). 07:00 CST Tue-Sat = 19:00 EDT / 18:00 EST the
+  prior calendar day in ET. That places the audit:
+    - ~3 hours after market close (16:00 ET),
+    - ~30 minutes after the daily-report fires (06:30 CST),
+    - ~14.5 hours before the next morning's daily-trade (21:35 CST).
+  Plenty of time for the operator to react to a failed audit before
+  the next trade fires.
+
+  Weekday=2..6 in CST = Tue..Sat CST = audit for Mon..Fri ET trade days.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.terrancehan.quant-daily-audit</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <!-- --for-date "yesterday CST" maps to the trading day whose trade
+             we are auditing: trade on Mon 09:35 ET = Mon 21:35 CST, saved
+             with run_date = Monday CST. Audit fires Tue 07:00 CST and
+             passes --for-date "yesterday CST" = Monday CST = the trade
+             we want to verify. -->
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-daily-audit --for-date "$(date -v-1d +%Y-%m-%d)"</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>6</integer></dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/terrancehan/Claude trader/quant</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/daily-audit.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/daily-audit.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

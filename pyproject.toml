@@ -46,6 +46,7 @@ dependencies = [
 # these by name (`uv run quant-daily-trade` etc.).
 quant-daily-trade = "quant.agent.daily_runner:cli_run_trade"
 quant-daily-report = "quant.agent.daily_runner:cli_run_report"
+quant-daily-audit = "quant.agent.audit:cli_run"
 quant-weekly-review = "quant.agent.weekly_review:cli_run"
 quant-monthly-review = "quant.agent.monthly_review:cli_run"
 
