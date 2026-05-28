@@ -538,11 +538,17 @@ class AlpacaExecutor:
                     StopLossRequest,
                 )
 
+                # TIF must be GTC for bracket orders so the stop-loss leg
+                # persists overnight. Alpaca's bracket spec requires GTC; if
+                # we use DAY, the stop child silently expires at 16:00 ET
+                # and tomorrow's open finds the position unprotected. The
+                # parent market order fills immediately regardless of TIF,
+                # so promoting to GTC has no downside for the entry.
                 req = MarketOrderRequest(
                     symbol=sym,
                     qty=target_qty,
                     side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
+                    time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.OTO,
                     stop_loss=StopLossRequest(stop_price=stop_price),
                 )
