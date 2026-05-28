@@ -183,8 +183,16 @@ class EmailSender:
             return
 
         # Real send: STARTTLS on the configured host:port, login, send, quit.
+        # The whole connect/login/send dance is retried as a unit on
+        # transient socket errors — Gmail occasionally resets connections
+        # through the VPN/proxy and a fresh handshake recovers cleanly.
+        # SMTPAuthenticationError is checked FIRST so we don't retry a
+        # permanent credential problem (just makes Gmail rate-limit you).
+        from quant.util.retry import retry_on_transient
+
         context = ssl.create_default_context()
-        try:
+
+        def _connect_and_send() -> None:
             with smtplib.SMTP(
                 self._config.smtp_host, self._config.smtp_port, timeout=30
             ) as client:
@@ -193,6 +201,18 @@ class EmailSender:
                     self._config.smtp_username, self._config.smtp_password
                 )
                 client.send_message(msg)
+
+        try:
+            retry_on_transient(
+                _connect_and_send,
+                transient=(
+                    smtplib.SMTPServerDisconnected,
+                    smtplib.SMTPConnectError,
+                    ConnectionError,   # builtin — covers socket-level resets
+                    OSError,           # parent of socket.error; e.g. ECONNRESET
+                ),
+                description="SMTP send",
+            )
         except smtplib.SMTPAuthenticationError as e:
             # The single most common first-time problem with Gmail.
             raise RuntimeError(
