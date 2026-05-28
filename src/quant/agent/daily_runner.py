@@ -39,6 +39,7 @@ from quant.agent.ensemble import (
     compute_ensemble_targets,
     load_ensemble_state,
     save_ensemble_state,
+    update_trail_highs,
 )
 from quant.agent.log import (
     DEFAULT_RUNS_DIR,
@@ -217,6 +218,19 @@ def run_daily_trade(
                 sym,
             )
 
+    # --- 3b. Update the trailing-stop ratchet -----------------------------
+    # Compute new trail_high for every name we're about to hold. Bumped
+    # to today's signal_price (yesterday's close) if higher than the
+    # prior tracked high; fresh entries seeded with today's price; names
+    # being flatted are dropped. This is the trailing-stop mechanism —
+    # it converts the static 5%-below-entry stop into a 5%-below-
+    # running-high stop, locking in gains as winners run.
+    new_trail = update_trail_highs(
+        prev_trail=dict(state.trail_high),
+        new_targets=set(target_weights.keys()),
+        signal_prices=signal_prices,
+    )
+
     # --- 4. Submit via the executor's agent flow ---
     report = executor.submit_daily_rebalance(
         target_weights=target_weights,
@@ -226,7 +240,28 @@ def run_daily_trade(
         dry_run=dry_run,
         notes=f"daily trade {today.isoformat()}"
               + (" (dry-run)" if dry_run else ""),
+        trail_highs=new_trail,
     )
+
+    # Persist the new trail map back to disk (skipping on dry-run so test
+    # / debug invocations don't pollute live state).
+    if not dry_run:
+        state = EnsembleState(
+            sma_fast=state.sma_fast,
+            sma_slow=state.sma_slow,
+            mr_lookback=state.mr_lookback,
+            mr_threshold_pct=state.mr_threshold_pct,
+            mr_allow_short=state.mr_allow_short,
+            xsec_top_k=state.xsec_top_k,
+            xsec_lookback=state.xsec_lookback,
+            xsec_skip=state.xsec_skip,
+            hrp_weights=state.hrp_weights,
+            last_hrp_refit_date=state.last_hrp_refit_date,
+            ai_strategy_names=list(state.ai_strategy_names),
+            ai_strategy_shadow_until=dict(state.ai_strategy_shadow_until),
+            trail_high=new_trail,
+        )
+        save_ensemble_state(state)
 
     # --- 5. Persist the full record. ---
     # Ensemble means there's no single "strategy" — record the names of
@@ -251,6 +286,7 @@ def run_daily_trade(
                 "ai_strategy_shadow_until": dict(state.ai_strategy_shadow_until),
                 "ai_strategies_graduated_today": graduated,
                 "shadow_targets_today": shadow_targets,
+                "trail_high": dict(new_trail),
             },
             "stop_loss_pct": STOP_LOSS_PCT,
             "max_position_weight": MAX_POSITION_WEIGHT,

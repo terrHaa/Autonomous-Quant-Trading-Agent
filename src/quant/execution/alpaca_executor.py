@@ -334,6 +334,7 @@ class AlpacaExecutor:
         max_position_weight: float = 0.20,
         dry_run: bool = False,
         notes: str = "",
+        trail_highs: dict[str, float] | None = None,
     ) -> ExecutionReport:
         """Daily-cadence rebalance with hard per-trade cap and stop-loss.
 
@@ -379,6 +380,15 @@ class AlpacaExecutor:
             If True, no network mutation; report shows what WOULD happen.
         notes
             Free-text saved on the report.
+        trail_highs
+            Optional per-symbol all-time-high price since position opened.
+            When provided, the stop level for ``sym`` is computed as
+            ``trail_highs[sym] * (1 - stop_loss_pct)`` instead of
+            ``signal_prices[sym] * (1 - stop_loss_pct)``. This is the
+            trailing-stop mechanism: as a winner ratchets up, its stop
+            ratchets up with it; on a flat or down day, the stop stays
+            at the prior high. Symbols absent from ``trail_highs`` fall
+            back to the signal-price stop (identical to legacy behavior).
         """
         if stop_loss_pct <= 0 or stop_loss_pct >= 1:
             raise ValueError(
@@ -514,8 +524,20 @@ class AlpacaExecutor:
                 ))
                 continue
 
-            stop_price = round(price * (1.0 - stop_loss_pct), 2)
+            # Trailing-stop ratchet: if caller supplied a trail_high for
+            # this name, anchor the stop to it (will be >= signal_price);
+            # otherwise anchor to the signal price (legacy entry-stop).
+            stop_anchor = (
+                trail_highs[sym]
+                if trail_highs is not None and sym in trail_highs
+                else price
+            )
+            stop_price = round(stop_anchor * (1.0 - stop_loss_pct), 2)
             # If for any reason stop_price >= entry signal price, refuse.
+            # (Can happen if trail_high * (1 - pct) > current signal_price,
+            # i.e. the stock has fallen so much that the trailing stop
+            # would fire immediately. Better to skip the re-entry than
+            # to buy-then-immediately-stop-out.)
             if stop_price >= price:
                 submitted.append(SubmittedOrder(
                     symbol=sym, side="buy", qty=target_qty,

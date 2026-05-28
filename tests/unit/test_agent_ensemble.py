@@ -22,6 +22,7 @@ from quant.agent.ensemble import (
     load_ensemble_state,
     refit_hrp_weights,
     save_ensemble_state,
+    update_trail_highs,
 )
 from quant.backtest.types import Snapshot
 from quant.data.alpaca_client import BAR_COLUMNS
@@ -256,6 +257,78 @@ def test_shadow_state_field_defaults_to_empty() -> None:
     """New EnsembleState has empty shadow map (backwards-compatible)."""
     state = EnsembleState()
     assert state.ai_strategy_shadow_until == {}
+
+
+# ---------------------------------------------------------------------------
+# update_trail_highs — the trailing-stop ratchet
+# ---------------------------------------------------------------------------
+
+
+def test_trail_high_default_empty() -> None:
+    """New EnsembleState has empty trail_high map (backwards-compatible)."""
+    assert EnsembleState().trail_high == {}
+
+
+def test_trail_high_new_entry_seeded_to_signal_price() -> None:
+    """A symbol entering for the first time gets trail_high = today's price."""
+    out = update_trail_highs(
+        prev_trail={},
+        new_targets={"AAPL", "MSFT"},
+        signal_prices={"AAPL": 200.0, "MSFT": 400.0},
+    )
+    assert out == {"AAPL": 200.0, "MSFT": 400.0}
+
+
+def test_trail_high_ratchets_up_on_higher_price() -> None:
+    """Surviving position: trail_high climbs when today's price exceeds it."""
+    out = update_trail_highs(
+        prev_trail={"AAPL": 200.0},
+        new_targets={"AAPL"},
+        signal_prices={"AAPL": 220.0},   # up day
+    )
+    assert out == {"AAPL": 220.0}
+
+
+def test_trail_high_stays_on_flat_or_down_day() -> None:
+    """When today's price is BELOW the trail high, the high doesn't budge."""
+    out = update_trail_highs(
+        prev_trail={"AAPL": 250.0},      # prior peak
+        new_targets={"AAPL"},
+        signal_prices={"AAPL": 230.0},   # retraced
+    )
+    assert out == {"AAPL": 250.0}        # ratchet locks the high
+
+
+def test_trail_high_drops_names_being_flatted() -> None:
+    """When a name leaves target_weights (being sold), it's removed from the trail."""
+    out = update_trail_highs(
+        prev_trail={"AAPL": 250.0, "MSFT": 400.0},
+        new_targets={"MSFT"},            # AAPL not in targets → flatten
+        signal_prices={"MSFT": 410.0},
+    )
+    assert "AAPL" not in out
+    assert out == {"MSFT": 410.0}
+
+
+def test_trail_high_skips_missing_or_nonpositive_prices() -> None:
+    """A target whose price is missing/<=0 is silently dropped (executor skips it too)."""
+    out = update_trail_highs(
+        prev_trail={"AAPL": 100.0},
+        new_targets={"AAPL", "BROKEN"},
+        signal_prices={"AAPL": 110.0},   # BROKEN missing
+    )
+    assert out == {"AAPL": 110.0}
+
+
+def test_trail_high_round_trip_through_state(tmp_path: Path) -> None:
+    """trail_high survives save/load of EnsembleState."""
+    state = EnsembleState(
+        trail_high={"AAPL": 200.0, "MSFT": 410.0},
+    )
+    fp = tmp_path / "state.json"
+    save_ensemble_state(state, path=fp)
+    loaded = load_ensemble_state(path=fp)
+    assert loaded.trail_high == {"AAPL": 200.0, "MSFT": 410.0}
 
 
 # ---------------------------------------------------------------------------

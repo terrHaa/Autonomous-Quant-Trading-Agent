@@ -365,6 +365,89 @@ def test_daily_rebalance_closes_stale_positions_not_in_targets() -> None:
     assert sells[0].qty == 50
 
 
+def test_daily_rebalance_uses_trail_highs_for_stop_anchor() -> None:
+    """When a trail_high is provided, the stop anchors to it, not the signal price.
+
+    AAPL signal price today is $200 (yesterday's close). Trail high from
+    a prior up-leg is $250. With a 5% stop, the trailing stop sits at
+    $250 * 0.95 = $237.50 — protecting most of the gain from the move
+    up from $200 to $250.
+
+    Note: $237.50 > signal $200, so the rebalance's stop_price>=signal
+    guard fires and the entry is refused — the position would be
+    immediately stopped out if we re-entered. That's the correct
+    trailing-stop behavior: if the stock has retraced enough that the
+    trailing stop would fire, exit and stay flat.
+    """
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 250.0},
+        dry_run=False,
+    )
+    failed = [o for o in report.submitted_orders if o.status == "failed"]
+    assert len(failed) >= 1
+    assert "stop_price" in failed[0].error
+
+
+def test_daily_rebalance_trail_high_below_signal_uses_it() -> None:
+    """When trail_high*0.95 < signal_price, the entry proceeds with trailing stop."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    # AAPL signal = $200, trail_high = $210 → trailing stop = $210*0.95 = $199.50
+    # $199.50 < $200 (signal), so the entry passes the >=guard.
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 210.0},
+        dry_run=True,
+    )
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # 210 * 0.95 = 199.5  (NOT 200 * 0.95 = 190 — the trail anchors the stop)
+    assert stop_row.stop_price == 199.50
+
+
+def test_daily_rebalance_signal_anchored_stop_when_no_trail_high() -> None:
+    """No trail_high provided → behaves exactly like the legacy entry-stop."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs=None,                  # legacy path
+        dry_run=True,
+    )
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # 200 * 0.95 = 190 (signal-anchored)
+    assert stop_row.stop_price == 190.0
+
+
+def test_daily_rebalance_trail_highs_only_applies_when_sym_present() -> None:
+    """Names in target_weights but NOT in trail_highs fall back to signal-anchored."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    # AAPL has trail_high; MSFT doesn't (e.g., MSFT is a fresh entry).
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.05, "MSFT": 0.05},
+        signal_prices={"AAPL": 200.0, "MSFT": 400.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 210.0},   # AAPL only
+        dry_run=True,
+    )
+    aapl_stop = next(o for o in report.submitted_orders
+                     if o.role == "stop_loss" and o.symbol == "AAPL").stop_price
+    msft_stop = next(o for o in report.submitted_orders
+                     if o.role == "stop_loss" and o.symbol == "MSFT").stop_price
+    # AAPL uses trail; MSFT uses signal.
+    assert aapl_stop == 199.50            # 210 * 0.95
+    assert msft_stop == 380.0             # 400 * 0.95
+
+
 def test_daily_rebalance_closes_held_target_even_when_qty_unchanged() -> None:
     """Held position with target_qty == current_qty MUST still be closed-and-reopened.
 

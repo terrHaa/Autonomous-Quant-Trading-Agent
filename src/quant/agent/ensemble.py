@@ -123,6 +123,46 @@ class EnsembleState:
     # period for every newly-accepted AI strategy.
     ai_strategy_shadow_until: dict[str, str] = field(default_factory=dict)
 
+    # Trailing-stop ratchet: symbol → highest signal price observed since
+    # the position was opened. Daily rebalance computes
+    #     stop_price = trail_high[sym] * (1 - stop_loss_pct)
+    # so the stop drifts UP as a name runs and never drifts down — even
+    # though we close-and-reopen every day. update_trail_highs() rebuilds
+    # this map each run before stops are submitted.
+    trail_high: dict[str, float] = field(default_factory=dict)
+
+
+def update_trail_highs(
+    *,
+    prev_trail: dict[str, float],
+    new_targets: set[str],
+    signal_prices: dict[str, float],
+) -> dict[str, float]:
+    """Recompute the trail_high map for today's rebalance.
+
+    Rules:
+      • A name in ``new_targets`` that was already tracked → bump to
+        ``max(prev_trail[sym], today_signal_price)``. This is the ratchet.
+      • A name in ``new_targets`` that is NEW → seed with today's signal
+        price (first-day high = entry price; stop = entry × (1 - pct),
+        identical to the pre-trailing behavior).
+      • A name NOT in ``new_targets`` is dropped entirely — the position
+        is being flatted today, so we forget the trail. If it re-enters
+        later, the trail starts fresh.
+      • Names whose price is missing or non-positive are skipped silently;
+        ``submit_daily_rebalance`` will skip them anyway.
+
+    Pure function — no I/O, no broker calls. Safe to call from tests.
+    """
+    new_trail: dict[str, float] = {}
+    for sym in new_targets:
+        today = signal_prices.get(sym, 0.0)
+        if today <= 0:
+            continue
+        prev = prev_trail.get(sym, 0.0)
+        new_trail[sym] = max(prev, today)
+    return new_trail
+
 
 def load_ensemble_state(path: Path | None = None) -> EnsembleState:
     """Load from JSON; return defaults if no file exists."""
