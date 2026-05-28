@@ -184,6 +184,7 @@ def test_monthly_review_runs_improver_and_emails(monkeypatch, tmp_path: Path) ->
         cache=_EmptyCache(),
         universe=["AAPL"],
         params_path=tmp_path / "params.json",
+        enable_ai_analyst=False,   # tests must not hit the Anthropic API
     )
     assert len(sender.sent) == 1
     assert "monthly review" in subject
@@ -238,6 +239,7 @@ def test_monthly_review_auto_apply_persists_new_params_when_gates_pass(
         universe=[f"S{i}" for i in range(10)],
         auto_apply=True,
         params_path=state_path,
+        enable_ai_analyst=False,
     )
 
     # The new xsec params should be on the ensemble state; other fields
@@ -297,6 +299,7 @@ def test_monthly_review_no_apply_does_not_persist_even_if_gate_passes(
         universe=["AAPL"],
         auto_apply=False,
         params_path=params_path,
+        enable_ai_analyst=False,
     )
 
     # No params file should exist — we didn't save.

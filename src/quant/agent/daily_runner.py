@@ -38,6 +38,7 @@ from quant.agent.ensemble import (
     build_strategies,
     compute_ensemble_targets,
     load_ensemble_state,
+    save_ensemble_state,
 )
 from quant.agent.log import (
     DEFAULT_RUNS_DIR,
@@ -122,17 +123,68 @@ def run_daily_trade(
             f"between {start} and {end}. Cache or Alpaca issue?"
         )
 
-    # --- 2. Build snapshot, run ALL strategies, combine via HRP weights ---
+    # --- 2a. Graduate any AI strategies whose shadow period has ended -------
+    # Shadow strategies live in state.ai_strategy_shadow_until until the
+    # ISO date there has passed. On the first daily run after that date,
+    # they "graduate": removed from the shadow map, given an equal-split
+    # initial HRP weight. The weekly refit takes over from there.
+    today_iso = today.isoformat()
+    graduated: list[str] = []
+    if state.ai_strategy_shadow_until:
+        still_shadow: dict[str, str] = {}
+        new_hrp = dict(state.hrp_weights)
+        for name, until_iso in state.ai_strategy_shadow_until.items():
+            if today_iso >= until_iso:
+                graduated.append(name)
+            else:
+                still_shadow[name] = until_iso
+
+        if graduated:
+            # Renormalise: existing weights scaled down, each graduate gets equal share.
+            n_total = len(new_hrp) + len(graduated)
+            equal_w = 1.0 / n_total
+            scale = 1.0 - equal_w * len(graduated)
+            new_hrp = {k: v * scale for k, v in new_hrp.items()}
+            for name in graduated:
+                new_hrp[name] = equal_w
+
+            state = EnsembleState(
+                sma_fast=state.sma_fast,
+                sma_slow=state.sma_slow,
+                mr_lookback=state.mr_lookback,
+                mr_threshold_pct=state.mr_threshold_pct,
+                mr_allow_short=state.mr_allow_short,
+                xsec_top_k=state.xsec_top_k,
+                xsec_lookback=state.xsec_lookback,
+                xsec_skip=state.xsec_skip,
+                hrp_weights=new_hrp,
+                last_hrp_refit_date=state.last_hrp_refit_date,
+                ai_strategy_names=list(state.ai_strategy_names),
+                ai_strategy_shadow_until=still_shadow,
+            )
+            save_ensemble_state(state)
+            logger.info(
+                "graduated %d AI strategies from shadow → active: %s",
+                len(graduated), graduated,
+            )
+
+    # Names still in shadow on today's run.
+    shadow_today: set[str] = set(state.ai_strategy_shadow_until.keys())
+
+    # --- 2b. Build snapshot, run ALL strategies, combine via HRP weights ----
     ts = bars.index.get_level_values("timestamp")
     as_of = ts.max().date()
     snapshot = Snapshot.from_full_bars(bars, as_of=as_of)
     strategies = build_strategies(state, universe)
+    shadow_targets: dict[str, dict[str, float]] = {}
     target_weights = compute_ensemble_targets(
         strategies, state.hrp_weights, snapshot,
+        shadow_strategies=shadow_today,
+        record_shadow_targets=shadow_targets,
     )
     logger.info(
-        "ensemble emitted %d target positions (as_of=%s)",
-        len(target_weights), as_of,
+        "ensemble emitted %d target positions (as_of=%s); %d strategies in shadow",
+        len(target_weights), as_of, len(shadow_today),
     )
 
     # --- 3. Signal prices = the last available close per target name. ---
@@ -195,6 +247,10 @@ def run_daily_trade(
                 "xsec_skip": state.xsec_skip,
                 "hrp_weights": state.hrp_weights,
                 "last_hrp_refit_date": state.last_hrp_refit_date,
+                "ai_strategy_names": list(state.ai_strategy_names),
+                "ai_strategy_shadow_until": dict(state.ai_strategy_shadow_until),
+                "ai_strategies_graduated_today": graduated,
+                "shadow_targets_today": shadow_targets,
             },
             "stop_loss_pct": STOP_LOSS_PCT,
             "max_position_weight": MAX_POSITION_WEIGHT,

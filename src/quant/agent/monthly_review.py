@@ -26,6 +26,14 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
+from dataclasses import asdict
+
+from quant.agent.ai_analyst import (
+    AIAnalyst,
+    AnalysisReport,
+    append_accepted_strategy_to_library,
+    append_memory_entry,
+)
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import (
@@ -40,6 +48,11 @@ from quant.agent.improver import (
 from quant.agent.log import DEFAULT_RUNS_DIR, load_daily_run
 from quant.agent.params import StrategyParams
 from quant.agent.reports import render_monthly_report
+from quant.agent.strategy_sandbox import (
+    SandboxResult,
+    save_generated_strategy,
+    validate_and_test_strategy,
+)
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
@@ -65,8 +78,18 @@ def run_monthly_review(
     # Test-injection points:
     cache: BarsCache | None = None,
     universe: list[str] | None = None,
+    enable_ai_analyst: bool = True,
 ) -> tuple[str, ImprovementResult | None]:
     """Run the month's review and return (subject, improvement_result).
+
+    Flow
+    ----
+    1. Aggregate the month's daily run JSONs.
+    2. Grid-search for better xsec-momentum params (math-based).
+    3. Call the AI analyst for a qualitative narrative + optional new strategy.
+    4. Validate + backtest the proposed strategy through the sandbox.
+    5. If it passes all gates, persist it and update the EnsembleState.
+    6. Render and email the full report (grid results + AI analysis + decision).
 
     ``improvement_result`` is None when the improver step was skipped
     (e.g., test mode where no cache is configured).
@@ -75,7 +98,7 @@ def run_monthly_review(
     runs_dir = runs_dir or DEFAULT_RUNS_DIR
     config = config or load_config()
 
-    # -------- 1. Aggregate the month's daily runs --------
+    # -------- 1. Aggregate the month's daily runs ----------------------------
     daily_runs = []
     equity_curve: dict[date, float] = {}
     for offset in range(31):
@@ -88,10 +111,7 @@ def run_monthly_review(
         if eq is not None:
             equity_curve[d] = float(eq)
 
-    # -------- 2. Improver step --------
-    # Load EnsembleState. The improver currently tunes only the
-    # cross-sectional momentum sub-strategy; SMA + MR tuning is a future
-    # extension. The weekly HRP refit handles the strategy-mix layer.
+    # -------- 2. Math-based grid search (xsec momentum params) ---------------
     current_state = load_ensemble_state(path=params_path)
     current_xsec_params = StrategyParams(
         top_k=current_state.xsec_top_k,
@@ -101,6 +121,8 @@ def run_monthly_review(
     universe = universe or load_top50_snapshot()
     improvement_result: ImprovementResult | None = None
     recommendations: list[str] = []
+    grid_search_summary = "Grid search was not run this month."
+    bars = None  # will be set below; reused for AI sandbox
 
     try:
         cache = cache or BarsCache(
@@ -113,6 +135,7 @@ def run_monthly_review(
             recommendations.append(
                 "Improver skipped: no bars fetched. Cache or Alpaca issue."
             )
+            grid_search_summary = "No bars available — grid search skipped."
         else:
             improvement_result = search_improvements(
                 current_xsec_params,
@@ -120,20 +143,26 @@ def run_monthly_review(
                 bars=bars,
                 config=config,
             )
+            n_cands = len(improvement_result.candidates)
             recommendations.append(
-                f"Improver evaluated {len(improvement_result.candidates)} candidates "
-                f"on {len(bars)} bars."
+                f"Grid search evaluated {n_cands} candidates on {len(bars)} bars."
             )
             best = improvement_result.best_passing
             if best is None:
-                recommendations.append(
-                    f"No change: {improvement_result.reason}"
+                recommendations.append(f"No parameter change: {improvement_result.reason}")
+                grid_search_summary = (
+                    f"Evaluated {n_cands} candidates. "
+                    f"No improvement found: {improvement_result.reason}"
                 )
             else:
+                grid_search_summary = (
+                    f"Evaluated {n_cands} candidates. "
+                    f"Best: top_k={best.params.top_k}, "
+                    f"lookback={best.params.lookback}, skip={best.params.skip}. "
+                    f"Sharpe {best.sharpe:.2f} vs current {improvement_result.current.sharpe:.2f}. "
+                    f"{improvement_result.reason}"
+                )
                 if auto_apply:
-                    # Persist the winning xsec params back into the
-                    # ensemble state (keep the SMA, MR, and HRP weights
-                    # untouched — those are managed elsewhere).
                     new_state = EnsembleState(
                         sma_fast=current_state.sma_fast,
                         sma_slow=current_state.sma_slow,
@@ -145,31 +174,222 @@ def run_monthly_review(
                         xsec_skip=best.params.skip,
                         hrp_weights=current_state.hrp_weights,
                         last_hrp_refit_date=current_state.last_hrp_refit_date,
+                        ai_strategy_names=list(current_state.ai_strategy_names),
                     )
                     save_ensemble_state(new_state, path=params_path)
+                    # Update current_state so the AI step sees the new params.
+                    current_state = new_state
                     recommendations.append(
-                        f"**APPLIED** xsec momentum params: "
+                        f"**APPLIED** xsec params: "
                         f"top_k={best.params.top_k}, "
                         f"lookback={best.params.lookback}, "
-                        f"skip={best.params.skip}. "
-                        f"Previous: top_k={current_xsec_params.top_k}, "
+                        f"skip={best.params.skip} "
+                        f"(was top_k={current_xsec_params.top_k}, "
                         f"lookback={current_xsec_params.lookback}, "
-                        f"skip={current_xsec_params.skip}. "
-                        f"Gate reason: {improvement_result.reason}"
+                        f"skip={current_xsec_params.skip})"
                     )
                 else:
                     recommendations.append(
                         f"Candidate passes all gates but auto-apply is off. "
-                        f"Candidate: top_k={best.params.top_k}, "
+                        f"Run without --no-apply to manually apply: "
+                        f"top_k={best.params.top_k}, "
                         f"lookback={best.params.lookback}, "
                         f"skip={best.params.skip}."
                     )
     except Exception as e:
-        # The improver is best-effort; failure doesn't block the email.
-        recommendations.append(f"Improver failed: {type(e).__name__}: {e}")
-        logger.exception("improver failed")
+        recommendations.append(f"Grid search failed: {type(e).__name__}: {e}")
+        logger.exception("grid search failed")
 
-    # -------- 3. Render + send --------
+    # -------- 3. AI analysis + strategy generation ---------------------------
+    if not enable_ai_analyst:
+        # Tests + dry-run paths can disable the API call entirely.
+        recommendations.append("\n---\n_AI analyst disabled (enable_ai_analyst=False)._")
+        subject, body = render_monthly_report(
+            month_ending=for_date,
+            daily_runs=daily_runs,
+            equity_curve=equity_curve,
+            recommendations=recommendations,
+        )
+        sender = email_sender or EmailSender()
+        sender.send(subject=subject, body_text=body, body_html=_markdown_to_html(body))
+        logger.info("monthly review emailed (AI disabled): %s", subject)
+        return subject, improvement_result
+
+    recommendations.append("\n---\n")
+    ai_report: AnalysisReport | None = None
+    try:
+        analyst = AIAnalyst()
+        ai_report = analyst.analyze(
+            daily_runs=daily_runs,
+            current_state=asdict(current_state),
+            ai_strategy_names=list(current_state.ai_strategy_names),
+            grid_search_summary=grid_search_summary,
+        )
+        # Always include the qualitative analysis in the email.
+        recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")
+
+        # -------- 4. Sandbox + gate the proposed strategy --------------------
+        if ai_report.proposed_strategy is None:
+            recommendations.append(
+                "_AI analyst: no new strategy proposed this month._"
+            )
+        elif bars is None or bars.empty:
+            recommendations.append(
+                "_AI analyst proposed a strategy but bars unavailable — "
+                "cannot backtest. Strategy not applied._"
+            )
+        else:
+            proposal = ai_report.proposed_strategy
+            # Skip if this strategy name is already in the ensemble.
+            if proposal.name in current_state.ai_strategy_names:
+                recommendations.append(
+                    f"_AI proposed '{proposal.name}' which is already active — skipped._"
+                )
+            else:
+                recommendations.append(
+                    f"**AI proposed strategy**: `{proposal.name}` ({proposal.class_name})\n\n"
+                    f"{proposal.reasoning}\n\n"
+                    "_Running sandbox validation…_"
+                )
+                sandbox: SandboxResult = validate_and_test_strategy(
+                    code=proposal.code,
+                    class_name=proposal.class_name,
+                    strategy_name=proposal.name,
+                    universe=universe,
+                    bars=bars,
+                    config=config,
+                )
+
+                if sandbox.passed_gates:
+                    # Save code to disk and update EnsembleState.
+                    save_generated_strategy(
+                        name=proposal.name,
+                        class_name=proposal.class_name,
+                        code=proposal.code,
+                    )
+                    # Accept into ensemble in SHADOW MODE:
+                    # - Added to ai_strategy_names (so build_strategies loads it)
+                    # - HRP weight stays at 0 during shadow (no real allocation)
+                    # - ai_strategy_shadow_until[name] = today + 10 business days
+                    # The daily runner graduates it at that date by removing
+                    # the entry and giving it an equal-split initial weight.
+                    import pandas as _pd  # noqa: PLC0415
+                    shadow_end = (
+                        _pd.Timestamp(for_date) + _pd.tseries.offsets.BDay(10)
+                    ).date()
+
+                    new_ai_names = list(current_state.ai_strategy_names) + [proposal.name]
+                    new_shadow_map = dict(current_state.ai_strategy_shadow_until)
+                    new_shadow_map[proposal.name] = shadow_end.isoformat()
+
+                    final_state = EnsembleState(
+                        sma_fast=current_state.sma_fast,
+                        sma_slow=current_state.sma_slow,
+                        mr_lookback=current_state.mr_lookback,
+                        mr_threshold_pct=current_state.mr_threshold_pct,
+                        mr_allow_short=current_state.mr_allow_short,
+                        xsec_top_k=current_state.xsec_top_k,
+                        xsec_lookback=current_state.xsec_lookback,
+                        xsec_skip=current_state.xsec_skip,
+                        hrp_weights=current_state.hrp_weights,   # unchanged — no allocation yet
+                        last_hrp_refit_date=current_state.last_hrp_refit_date,
+                        ai_strategy_names=new_ai_names,
+                        ai_strategy_shadow_until=new_shadow_map,
+                    )
+                    save_ensemble_state(final_state, path=params_path)
+                    recommendations.append(
+                        f"✅ **AI STRATEGY ACCEPTED — ENTERING 10-DAY SHADOW**: `{proposal.name}`\n\n"
+                        f"- Sharpe: {sandbox.sharpe:.2f}\n"
+                        f"- Max drawdown: {sandbox.max_drawdown:.1%}\n"
+                        f"- DSR: {sandbox.dsr:.3f}\n\n"
+                        f"Shadow period ends: **{shadow_end.isoformat()}** "
+                        f"(10 business days from today).\n\n"
+                        f"During shadow the strategy will be called every day and its "
+                        f"targets logged for analysis, but allocation remains zero. "
+                        f"On {shadow_end.isoformat()} the daily runner graduates it to "
+                        f"equal-split HRP weight; the weekly refit takes over from there.\n\n"
+                        f"```python\n{proposal.code}\n```"
+                    )
+                    logger.info(
+                        "monthly review: AI strategy '%s' applied. "
+                        "Sharpe=%.2f DSR=%.3f",
+                        proposal.name, sandbox.sharpe, sandbox.dsr,
+                    )
+                    # Persist to STRATEGY_LIBRARY.md so next month's analyst
+                    # sees this strategy in its canonical catalog.
+                    append_accepted_strategy_to_library(
+                        review_date=for_date,
+                        proposal=proposal,
+                        sharpe=sandbox.sharpe,
+                        max_drawdown=sandbox.max_drawdown,
+                        dsr=sandbox.dsr,
+                    )
+                else:
+                    recommendations.append(
+                        f"❌ **AI strategy rejected**: {sandbox.rejection_reason}\n\n"
+                        f"- Sharpe: {sandbox.sharpe:.2f} (min {0.30:.2f})\n"
+                        f"- Max drawdown: {sandbox.max_drawdown:.1%} (cap 35%)\n"
+                        f"- DSR: {sandbox.dsr:.3f} (threshold 0.95)\n\n"
+                        f"The strategy code is logged below for reference:\n\n"
+                        f"```python\n{proposal.code}\n```"
+                    )
+                    logger.info(
+                        "monthly review: AI strategy '%s' rejected — %s",
+                        proposal.name, sandbox.rejection_reason,
+                    )
+
+        # -------- Always append to MEMORY.md (success, rejection, or no proposal)
+        try:
+            if ai_report.proposed_strategy is None:
+                outcome_label = "no_proposal"
+                sandbox_summary = "(no proposal made)"
+            elif ai_report.proposed_strategy.name in (current_state.ai_strategy_names or []):
+                outcome_label = "duplicate_skipped"
+                sandbox_summary = f"Name already active — skipped sandbox."
+            elif bars is None or bars.empty:
+                outcome_label = "no_bars"
+                sandbox_summary = "Bars unavailable — sandbox not run."
+            elif sandbox.passed_gates:  # type: ignore[possibly-undefined]
+                outcome_label = "accepted"
+                sandbox_summary = (
+                    f"Sharpe={sandbox.sharpe:.3f}, "
+                    f"MaxDD={sandbox.max_drawdown:.1%}, "
+                    f"DSR={sandbox.dsr:.3f} — passed all gates."
+                )
+            else:
+                outcome_label = "rejected"
+                sandbox_summary = (
+                    f"Sharpe={sandbox.sharpe:.3f}, "
+                    f"MaxDD={sandbox.max_drawdown:.1%}, "
+                    f"DSR={sandbox.dsr:.3f}. "
+                    f"Reason: {sandbox.rejection_reason}"
+                )
+
+            append_memory_entry(
+                review_date=for_date,
+                analysis=ai_report.analysis,
+                proposal=ai_report.proposed_strategy,
+                outcome=outcome_label,
+                sandbox_details=sandbox_summary,
+                grid_search_summary=grid_search_summary,
+            )
+        except Exception as mem_err:
+            # MEMORY.md write failure must not break the review.
+            logger.warning("ai_analyst: failed to append MEMORY.md entry: %s", mem_err)
+
+    except RuntimeError as e:
+        # ANTHROPIC_API_KEY not set — not a bug, just not configured yet.
+        recommendations.append(
+            f"_AI analyst skipped: {e}_\n\n"
+            "Add `ANTHROPIC_API_KEY=sk-ant-...` to your `.env` file to enable it."
+        )
+        logger.info("ai analyst skipped (no API key): %s", e)
+    except Exception as e:
+        # Any other error — log and continue so the email still goes out.
+        recommendations.append(f"_AI analyst failed: {type(e).__name__}: {e}_")
+        logger.exception("ai analyst failed")
+
+    # -------- 5. Render + send -----------------------------------------------
     subject, body = render_monthly_report(
         month_ending=for_date,
         daily_runs=daily_runs,

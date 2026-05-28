@@ -36,6 +36,9 @@ dependencies = [
 
     # --- Reporting ---
     "jinja2>=3.1",         # Templating for markdown reports.
+
+    # --- AI analyst (monthly strategy review + generation) ---
+    "anthropic>=0.30",     # Anthropic SDK — Claude API for strategy analysis.
 ]
 
 [project.scripts]

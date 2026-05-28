@@ -165,6 +165,100 @@ def test_zero_weight_strategy_is_short_circuited() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Safety: per-strategy exception isolation
+# ---------------------------------------------------------------------------
+
+
+class _RaisingStrategy:
+    """on_bar always raises — simulates a buggy AI-generated strategy."""
+
+    def __init__(self, name: str, exc: Exception):
+        self.name = name
+        self._exc = exc
+
+    def on_bar(self, snapshot):
+        raise self._exc
+
+
+def test_one_strategy_raising_does_not_break_the_others() -> None:
+    """If one strategy raises during on_bar, the others must still contribute.
+
+    This is the most important operational protection — a bug in
+    AI-generated code cannot crash the entire daily trade routine.
+    """
+    strategies = [
+        _ConstantStrategy("STABLE_A", {"AAPL": 1.0}),
+        _RaisingStrategy("BUGGY", ZeroDivisionError("division by zero")),
+        _ConstantStrategy("STABLE_B", {"MSFT": 1.0}),
+    ]
+    hrp = {"STABLE_A": 0.4, "BUGGY": 0.3, "STABLE_B": 0.3}
+    out = compute_ensemble_targets(strategies, hrp, _dummy_snapshot())
+    # BUGGY contributed nothing. STABLE_A and STABLE_B still applied.
+    assert out["AAPL"] == pytest.approx(0.4)
+    assert out["MSFT"] == pytest.approx(0.3)
+
+
+def test_strategy_raising_does_not_propagate_to_caller() -> None:
+    """compute_ensemble_targets must never raise even if every strategy fails."""
+    strategies = [
+        _RaisingStrategy("A", RuntimeError("a")),
+        _RaisingStrategy("B", ValueError("b")),
+    ]
+    hrp = {"A": 0.5, "B": 0.5}
+    # Should return an empty dict, NOT raise.
+    out = compute_ensemble_targets(strategies, hrp, _dummy_snapshot())
+    assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# Safety: shadow mode
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_strategies_do_not_contribute_to_targets() -> None:
+    """A strategy in shadow_strategies must have ZERO impact on combined targets."""
+    strategies = [
+        _ConstantStrategy("ACTIVE", {"AAPL": 1.0}),
+        _ConstantStrategy("SHADOW", {"NVDA": 1.0}),
+    ]
+    hrp = {"ACTIVE": 0.5, "SHADOW": 0.5}  # even though SHADOW has weight,
+    out = compute_ensemble_targets(
+        strategies, hrp, _dummy_snapshot(),
+        shadow_strategies={"SHADOW"},
+    )
+    # SHADOW's targets are NOT in the combined output.
+    assert out["AAPL"] == pytest.approx(0.5)
+    assert "NVDA" not in out
+
+
+def test_shadow_targets_are_recorded() -> None:
+    """If record_shadow_targets dict is passed, shadow strategies' targets
+    are captured for later analysis (so we can see what they'd have traded)."""
+    strategies = [
+        _ConstantStrategy("ACTIVE", {"AAPL": 1.0}),
+        _ConstantStrategy("SHADOW", {"NVDA": 0.7, "AMD": 0.3}),
+    ]
+    hrp = {"ACTIVE": 1.0, "SHADOW": 0.0}
+    sink: dict[str, dict[str, float]] = {}
+    compute_ensemble_targets(
+        strategies, hrp, _dummy_snapshot(),
+        shadow_strategies={"SHADOW"},
+        record_shadow_targets=sink,
+    )
+    assert "SHADOW" in sink
+    assert sink["SHADOW"]["NVDA"] == pytest.approx(0.7)
+    assert sink["SHADOW"]["AMD"] == pytest.approx(0.3)
+    # Active strategy is NOT recorded as shadow.
+    assert "ACTIVE" not in sink
+
+
+def test_shadow_state_field_defaults_to_empty() -> None:
+    """New EnsembleState has empty shadow map (backwards-compatible)."""
+    state = EnsembleState()
+    assert state.ai_strategy_shadow_until == {}
+
+
+# ---------------------------------------------------------------------------
 # refit_hrp_weights — the weekly self-improvement
 # ---------------------------------------------------------------------------
 

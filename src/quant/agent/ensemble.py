@@ -59,6 +59,10 @@ from quant.strategies import (
     SmaCrossover,
 )
 
+# Import lazily to avoid circular deps and keep startup fast.
+# strategy_sandbox.load_generated_strategy is called only inside build_strategies.
+_GENERATED_DIR = Path(__file__).resolve().parent.parent / "strategies" / "generated"
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +109,20 @@ class EnsembleState:
     })
     last_hrp_refit_date: str = ""   # ISO date; empty = never
 
+    # AI-generated strategy names that have passed the sandbox gates.
+    # Each name here has a corresponding .py + .json file in
+    # src/quant/strategies/generated/. build_strategies() loads them
+    # dynamically so the daily runner picks them up automatically.
+    ai_strategy_names: list[str] = field(default_factory=list)
+
+    # Shadow mode: name → ISO date until which the strategy trades with
+    # ZERO allocation (its targets are captured for analysis but don't
+    # affect the real portfolio). After this date, the daily runner
+    # "graduates" the strategy — removes the entry and gives it an
+    # equal-split initial HRP weight. This is a 10-trading-day paper
+    # period for every newly-accepted AI strategy.
+    ai_strategy_shadow_until: dict[str, str] = field(default_factory=dict)
+
 
 def load_ensemble_state(path: Path | None = None) -> EnsembleState:
     """Load from JSON; return defaults if no file exists."""
@@ -129,12 +147,15 @@ def save_ensemble_state(state: EnsembleState, path: Path | None = None) -> Path:
 
 
 def build_strategies(state: EnsembleState, universe: list[str]) -> list[Strategy]:
-    """Build the three strategy instances from the persisted state.
+    """Build strategy instances from the persisted state.
 
-    Returned in a stable order: SMA, MR, XsecMomentum. Each has the
-    standard ``.name`` field; the HRP weights dict keys must match.
+    Always returns the three base strategies (SMA, MR, XsecMomentum) plus
+    any AI-generated strategies listed in ``state.ai_strategy_names`` that
+    have valid files on disk. Strategies that fail to load are skipped with
+    a warning rather than crashing the agent — resilience over correctness
+    for a missing file edge case.
     """
-    return [
+    strategies: list[Strategy] = [
         SmaCrossover(universe, fast=state.sma_fast, slow=state.sma_slow),
         MeanReversion(
             universe,
@@ -150,6 +171,23 @@ def build_strategies(state: EnsembleState, universe: list[str]) -> list[Strategy
         ),
     ]
 
+    # Dynamically load any AI-generated strategies that passed sandbox gates.
+    if state.ai_strategy_names:
+        from quant.agent.strategy_sandbox import load_generated_strategy  # noqa: PLC0415
+        for ai_name in state.ai_strategy_names:
+            strat = load_generated_strategy(ai_name, universe)
+            if strat is not None:
+                strategies.append(strat)
+                logger.debug("build_strategies: loaded AI strategy '%s'", ai_name)
+            else:
+                logger.warning(
+                    "build_strategies: AI strategy '%s' listed in EnsembleState "
+                    "but could not be loaded from disk — skipping",
+                    ai_name,
+                )
+
+    return strategies
+
 
 # ---------------------------------------------------------------------------
 # Daily inner-product: per-strategy targets → final per-symbol targets
@@ -160,6 +198,9 @@ def compute_ensemble_targets(
     strategies: list[Strategy],
     hrp_w: dict[str, float],
     snapshot: Snapshot,
+    *,
+    shadow_strategies: set[str] | None = None,
+    record_shadow_targets: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, float]:
     """Combine strategy outputs into final per-symbol target weights.
 
@@ -173,15 +214,54 @@ def compute_ensemble_targets(
 
     Strategies whose name isn't in ``hrp_w`` get zero weight (defensive
     against stale strategy lists).
+
+    Resilience: each strategy's ``on_bar`` is wrapped in try/except so
+    that a buggy AI-generated strategy CANNOT crash the daily trade
+    routine. A failing strategy is logged and skipped; the others still
+    contribute their signals. This is the key protection against
+    operational risk from autonomous code generation.
+
+    Shadow mode:
+        ``shadow_strategies`` — names of AI strategies currently in their
+        10-trading-day paper period. Their ``on_bar`` is still called
+        (so we can record what they would have traded) but their
+        contribution to the combined targets is **zero**. If
+        ``record_shadow_targets`` is provided, the shadow strategies'
+        targets are written into it for later analysis.
     """
     combined: dict[str, float] = defaultdict(float)
+    shadow_strategies = shadow_strategies or set()
+
     for strat in strategies:
+        # Always TRY to compute targets — even shadow strategies, so we
+        # can capture what they would have traded.
+        try:
+            targets = strat.on_bar(snapshot)
+        except Exception as e:
+            logger.warning(
+                "compute_ensemble_targets: strategy '%s' raised %s during "
+                "on_bar() — skipping this strategy for today. Error: %s",
+                strat.name, type(e).__name__, e,
+            )
+            continue
+
+        # Shadow mode: capture targets but don't apply them.
+        if strat.name in shadow_strategies:
+            if record_shadow_targets is not None:
+                # Coerce to floats so the JSON payload is clean.
+                clean: dict[str, float] = {}
+                for sym, w in targets.items():
+                    if isinstance(w, (int, float)):
+                        clean[sym] = float(w)
+                    else:
+                        clean[sym] = float(getattr(w, "target_weight", 0.0))
+                record_shadow_targets[strat.name] = clean
+            continue
+
+        # Active strategy: apply its HRP weight to the combined book.
         h = hrp_w.get(strat.name, 0.0)
         if h == 0.0:
-            # Skip entirely; running an unused strategy still costs a few
-            # ms per bar so don't bother.
             continue
-        targets = strat.on_bar(snapshot)
         for sym, w in targets.items():
             # OrderIntent objects flow through unchanged from any strategy
             # that emits them; for the ensemble we only know how to add
