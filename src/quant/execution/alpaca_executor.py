@@ -425,21 +425,26 @@ class AlpacaExecutor:
             sym: qty for sym, qty in positions.items()
             if sym not in target_symbols and qty != 0
         }
-        # We also close positions whose target qty differs from current
-        # (the close-and-reopen simplification documented above).
+        # We ALSO close every in-target position with current_qty > 0,
+        # regardless of whether target_qty matches current_qty.
+        #
+        # Why unconditional: step 1 cancelled yesterday's GTC stop on every
+        # held name. Step 3 unconditionally submits a fresh OTO bracket
+        # (buy + stop child) for every target. If we skipped the close
+        # here when qty happened to match, step 3's buy would DOUBLE the
+        # position — broker has 50 shares, we buy 50 more, end up at 100,
+        # with a stop covering only the latest 50. The close-and-reopen
+        # invariant in the comment above (step 3) depends on this loop
+        # placing every in-target name into stale_positions.
+        #
+        # Cost: ~52 unnecessary orders per day in steady state (each
+        # name's sell + re-buy when target_qty equals current_qty).
+        # At zero commissions on paper this is just slippage — measured
+        # at a few dollars per day on $100k for the current 26-name
+        # ensemble — and it preserves the simple, correct invariant.
         for sym in target_symbols:
             current_qty = positions.get(sym, 0)
-            if current_qty <= 0:
-                continue
-            target_dollars = target_weights[sym] * equity
-            price = signal_prices.get(sym)
-            if price is None or price <= 0:
-                # No price → can't even compute target qty → conservative
-                # exit. We'll skip the re-entry in step 3 too.
-                stale_positions[sym] = current_qty
-                continue
-            target_qty = int(target_dollars / price)
-            if current_qty != target_qty:
+            if current_qty > 0:
                 stale_positions[sym] = current_qty
 
         for sym, qty in sorted(stale_positions.items()):

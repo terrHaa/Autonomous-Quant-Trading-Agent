@@ -363,3 +363,38 @@ def test_daily_rebalance_closes_stale_positions_not_in_targets() -> None:
              if o.symbol == "OLDPOS" and o.side == "sell"]
     assert len(sells) == 1
     assert sells[0].qty == 50
+
+
+def test_daily_rebalance_closes_held_target_even_when_qty_unchanged() -> None:
+    """Held position with target_qty == current_qty MUST still be closed-and-reopened.
+
+    Step 1 cancels yesterday's GTC stops, so any in-target position needs
+    a fresh stop attached via the OTO bracket. If we skipped the close
+    when qty matched, step 3's unconditional buy would DOUBLE the position
+    (broker has 50; step 3 buys 50 more → 100). This test pins down the
+    correct close-and-reopen invariant.
+    """
+    # Equity 100k, weight 0.10, price $200 → target_qty = 50.
+    # Current_qty also 50 → bug case.
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        dry_run=True,
+    )
+    # We expect: 1 sell (close), 1 buy (re-open with bracket), 1 stop_loss audit row.
+    by_role = {}
+    for o in report.submitted_orders:
+        by_role.setdefault((o.role, o.side), []).append(o)
+    # The close-out sell goes through the bare-entry path with role='entry'.
+    assert ("entry", "sell") in by_role, (
+        f"expected a sell row for the close; got roles: {sorted(by_role)}"
+    )
+    assert by_role[("entry", "sell")][0].qty == 50
+    # The re-entry buy + stop_loss audit row.
+    assert ("entry", "buy") in by_role
+    assert by_role[("entry", "buy")][0].qty == 50
+    assert ("stop_loss", "sell") in by_role
+    assert by_role[("stop_loss", "sell")][0].qty == 50
