@@ -125,11 +125,23 @@ class EnsembleState:
 
     # Trailing-stop ratchet: symbol → highest signal price observed since
     # the position was opened. Daily rebalance computes
-    #     stop_price = trail_high[sym] * (1 - stop_loss_pct)
+    #     stop_price = trail_high[sym] * (1 - trail_pct)
     # so the stop drifts UP as a name runs and never drifts down — even
     # though we close-and-reopen every day. update_trail_highs() rebuilds
     # this map each run before stops are submitted.
     trail_high: dict[str, float] = field(default_factory=dict)
+
+    # Trailing-stop DISTANCE (the % below the running high at which the
+    # stop sits). Tunable by the AI analyst — tighter values protect more
+    # gains but cause more whipsaw exits on retracements; wider values
+    # let winners breathe but give back more on reversal.
+    # Constraint: must be in (0, STOP_LOSS_PCT]. The operator's 5%
+    # initial-entry stop (in daily_runner.STOP_LOSS_PCT) is a HARD CEILING
+    # for trail_pct — the trail can be tighter than the entry stop but
+    # never looser (otherwise a fresh entry could exit at -trail_pct,
+    # violating the -5% floor rule). Default == 0.05, identical behavior
+    # to a static stop until the AI proposes a tighter value.
+    trail_pct: float = 0.05
 
 
 def update_trail_highs(

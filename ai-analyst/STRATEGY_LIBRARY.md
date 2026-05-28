@@ -10,6 +10,54 @@
 
 ---
 
+## Risk-Management Components (system-level, not in build_strategies)
+
+These components apply uniformly to every position, regardless of which
+strategy generated the entry signal. They are tunable via fields on
+`EnsembleState` and you (the analyst) may propose adjustments to them
+via `proposed_state_changes` in your response.
+
+### Per-entry initial stop loss — `STOP_LOSS_PCT = 0.05` (operator hard rule)
+
+Every fresh entry has an atomic stop attached at
+`entry_signal_price * (1 - 0.05)`. **This is the operator's hard floor
+and cannot be changed by the analyst.** It exists to cap the loss on
+any single new position at 5%. Quoted here so you know it's there.
+
+### Trailing stop ratchet — `EnsembleState.trail_high` + `trail_pct` (TUNABLE)
+
+Once a position is open, the system tracks its highest signal price
+since entry (`trail_high[sym]`) and computes the daily stop as
+`trail_high[sym] * (1 - trail_pct)`. The stop only ratchets UP, never
+down — locking in gains on winners. On a flat or down day, the stop
+stays at the prior high; if a retrace pushes the trailing stop above
+the current signal price, the next rebalance refuses the re-entry and
+the position stays flat (the trailing stop has effectively fired).
+
+**Tunable**: `state.trail_pct` ∈ (0, 0.05]. Default 0.05 = behaves like
+a static 5% stop. A tighter value (e.g. 0.03) locks in more gains but
+exits earlier on retracements; a value near 0.05 lets winners breathe
+more. Cannot exceed `STOP_LOSS_PCT` — a trail wider than the entry
+stop would violate the operator's per-trade loss floor.
+
+**When to propose a change**:
+- If multiple recent months show winners running >20% then giving back
+  >10% before the next rebalance flatted them organically, propose a
+  tighter trail (e.g. 0.03).
+- If many positions are getting stopped out by intraday noise then
+  re-bought next day at similar prices (visible as same symbol in
+  consecutive runs with sells-rebuys), propose a wider trail.
+- If the trail behavior is fine and no clear signal exists, propose
+  nothing — the static 5% default is sensible.
+
+### Per-position max weight — `MAX_POSITION_WEIGHT = 0.20` (operator hard rule)
+
+No single position may exceed 20% of equity. Hard floor; cannot be
+changed by the analyst. Quoted so you know to size proposals so they
+don't hit the cap in normal conditions.
+
+---
+
 ## Active Strategies (loaded by ensemble.build_strategies)
 
 ### 1. `sma_crossover_50_200` — base strategy

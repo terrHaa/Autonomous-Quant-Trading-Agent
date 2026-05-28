@@ -335,6 +335,7 @@ class AlpacaExecutor:
         dry_run: bool = False,
         notes: str = "",
         trail_highs: dict[str, float] | None = None,
+        trail_pct: float | None = None,
     ) -> ExecutionReport:
         """Daily-cadence rebalance with hard per-trade cap and stop-loss.
 
@@ -383,16 +384,30 @@ class AlpacaExecutor:
         trail_highs
             Optional per-symbol all-time-high price since position opened.
             When provided, the stop level for ``sym`` is computed as
-            ``trail_highs[sym] * (1 - stop_loss_pct)`` instead of
+            ``trail_highs[sym] * (1 - trail_pct)`` (or ``stop_loss_pct``
+            if trail_pct is None) instead of
             ``signal_prices[sym] * (1 - stop_loss_pct)``. This is the
             trailing-stop mechanism: as a winner ratchets up, its stop
             ratchets up with it; on a flat or down day, the stop stays
             at the prior high. Symbols absent from ``trail_highs`` fall
             back to the signal-price stop (identical to legacy behavior).
+        trail_pct
+            Optional trailing-stop distance (e.g. 0.03 = 3% below the
+            running high). When None, falls back to ``stop_loss_pct``
+            (identical behavior to no trailing-stop tuning). Must satisfy
+            ``0 < trail_pct <= stop_loss_pct`` if given — a trail wider
+            than the initial entry stop would violate the operator's
+            single-trade loss floor on a fresh-entry's down day.
         """
         if stop_loss_pct <= 0 or stop_loss_pct >= 1:
             raise ValueError(
                 f"stop_loss_pct must be in (0, 1); got {stop_loss_pct}"
+            )
+        if trail_pct is not None and (trail_pct <= 0 or trail_pct > stop_loss_pct):
+            raise ValueError(
+                f"trail_pct must be in (0, {stop_loss_pct}]; got {trail_pct}. "
+                "A trailing stop wider than the entry stop would violate the "
+                "operator's per-trade loss floor on a fresh entry's down day."
             )
         if any(w < 0 for w in target_weights.values()):
             raise ValueError(
@@ -525,14 +540,17 @@ class AlpacaExecutor:
                 continue
 
             # Trailing-stop ratchet: if caller supplied a trail_high for
-            # this name, anchor the stop to it (will be >= signal_price);
-            # otherwise anchor to the signal price (legacy entry-stop).
-            stop_anchor = (
-                trail_highs[sym]
-                if trail_highs is not None and sym in trail_highs
-                else price
-            )
-            stop_price = round(stop_anchor * (1.0 - stop_loss_pct), 2)
+            # this name, anchor the stop to it (will be >= signal_price)
+            # and use trail_pct (if supplied) for the distance — typically
+            # tighter than stop_loss_pct. Otherwise anchor to the signal
+            # price and use stop_loss_pct (legacy entry-stop semantics).
+            if trail_highs is not None and sym in trail_highs:
+                stop_anchor = trail_highs[sym]
+                stop_dist = trail_pct if trail_pct is not None else stop_loss_pct
+            else:
+                stop_anchor = price
+                stop_dist = stop_loss_pct
+            stop_price = round(stop_anchor * (1.0 - stop_dist), 2)
             # If for any reason stop_price >= entry signal price, refuse.
             # (Can happen if trail_high * (1 - pct) > current signal_price,
             # i.e. the stock has fallen so much that the trailing stop

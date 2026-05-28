@@ -175,6 +175,9 @@ def run_monthly_review(
                         hrp_weights=current_state.hrp_weights,
                         last_hrp_refit_date=current_state.last_hrp_refit_date,
                         ai_strategy_names=list(current_state.ai_strategy_names),
+                        ai_strategy_shadow_until=dict(current_state.ai_strategy_shadow_until),
+                        trail_high=dict(current_state.trail_high),
+                        trail_pct=current_state.trail_pct,
                     )
                     save_ensemble_state(new_state, path=params_path)
                     # Update current_state so the AI step sees the new params.
@@ -227,6 +230,35 @@ def run_monthly_review(
         )
         # Always include the qualitative analysis in the email.
         recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")
+
+        # -------- 3b. Surface any proposed state-change (trail_pct) ---------
+        # We do NOT auto-apply state changes — risk-management tuning is
+        # too important to handle silently. The operator reviews and edits
+        # ensemble_state.json manually if they agree with the proposal.
+        sc = ai_report.proposed_state_changes
+        if sc is not None and sc.trail_pct is not None:
+            new_val = sc.trail_pct
+            cur_val = current_state.trail_pct
+            # Light validation — surface a warning if the proposal violates
+            # the operator's hard ceiling. Don't suppress it; the operator
+            # might still want to see what the analyst was thinking.
+            from quant.agent.daily_runner import STOP_LOSS_PCT
+            within_bounds = 0 < new_val <= STOP_LOSS_PCT
+            verdict = (
+                "VALID — within bounds; operator may apply by editing "
+                "`trail_pct` in `data/agent/ensemble_state.json`."
+                if within_bounds else
+                f"OUT OF BOUNDS — must be in (0, {STOP_LOSS_PCT}]. "
+                "Operator should NOT apply this value verbatim."
+            )
+            arrow = "↓" if new_val < cur_val else "↑" if new_val > cur_val else "→"
+            recommendations.append(
+                f"## 🎯 AI proposed `trail_pct` change\n\n"
+                f"**Current**: `{cur_val:.4f}` {arrow} **Proposed**: `{new_val:.4f}` "
+                f"({verdict})\n\n"
+                f"**Reasoning** (verbatim from analyst):\n\n"
+                f"> {sc.reasoning}\n"
+            )
 
         # -------- 4. Sandbox + gate the proposed strategy --------------------
         if ai_report.proposed_strategy is None:
@@ -295,6 +327,8 @@ def run_monthly_review(
                         last_hrp_refit_date=current_state.last_hrp_refit_date,
                         ai_strategy_names=new_ai_names,
                         ai_strategy_shadow_until=new_shadow_map,
+                        trail_high=dict(current_state.trail_high),
+                        trail_pct=current_state.trail_pct,
                     )
                     save_ensemble_state(final_state, path=params_path)
                     recommendations.append(

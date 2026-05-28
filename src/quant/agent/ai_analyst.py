@@ -70,14 +70,23 @@ Return a single JSON object with this exact shape:
     "class_name": "<PascalCase e.g. RsiReversal>",
     "reasoning": "<Must include all 6 sections from ANALYST.md §2: edge thesis, math spec, regime analysis table, correlation hypothesis, statistical properties, falsification criteria>",
     "code": "<complete self-contained Python class string — see ANALYST.md §3>"
-  }
+  } | null,
+  "proposed_state_changes": {
+    "trail_pct": <float in (0, 0.05] | null>,
+    "reasoning": "<quantitative evidence per ANALYST.md §6.5 — cite specific symbols, give-back magnitudes, or whipsaw counts from the daily runs table. Vague intuition is NOT acceptable.>"
+  } | null
 }
 
-OR — and this is fully acceptable per ANALYST.md §7 — return:
-{
-  "analysis": "<analysis explaining why no proposal is warranted this month>",
-  "proposed_strategy": null
-}
+ALL of the following are acceptable structures:
+  - Strategy proposal AND state change   (both fields populated)
+  - Strategy proposal only               (proposed_state_changes: null)
+  - State change only                    (proposed_strategy: null)
+  - Analysis only                        (both null — per ANALYST.md §7)
+
+Use `proposed_state_changes` for tuning the trailing-stop distance.
+Use `proposed_strategy` for proposing a NEW strategy class.
+Use `analysis` text for everything else (qualitative commentary,
+regime observations, ensemble-mix opinions, etc.).
 """
 
 
@@ -119,10 +128,24 @@ class StrategyProposal:
 
 
 @dataclass
+class StateChangeProposal:
+    """A proposed adjustment to a tunable EnsembleState field.
+
+    Currently the only knob the analyst controls is ``trail_pct`` (the
+    trailing-stop distance, see ANALYST.md §6.5). Future tunables can
+    be added as optional fields — old months' MEMORY.md entries will
+    simply have them absent.
+    """
+    trail_pct: float | None = None   # new trailing-stop distance, in (0, 0.05]
+    reasoning: str = ""              # quantitative evidence for the change
+
+
+@dataclass
 class AnalysisReport:
     """Full output of one AI analyst call."""
     analysis: str                         # qualitative narrative
     proposed_strategy: StrategyProposal | None  # None if no proposal
+    proposed_state_changes: StateChangeProposal | None = None  # None if no tuning
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +324,31 @@ class AIAnalyst:
                     "ai_analyst: proposed_strategy missing field %s — ignoring proposal", e
                 )
 
-        return AnalysisReport(analysis=analysis_text, proposed_strategy=proposal)
+        # Parse the optional state-change proposal (e.g., new trail_pct).
+        # Validation here is light — type-coerce and clamp. The actual
+        # gate (trail_pct ≤ STOP_LOSS_PCT) lives in monthly_review where
+        # the proposal is surfaced to the operator.
+        state_change_data = data.get("proposed_state_changes")
+        state_change: StateChangeProposal | None = None
+        if state_change_data and isinstance(state_change_data, dict):
+            try:
+                raw_trail = state_change_data.get("trail_pct")
+                trail_pct = float(raw_trail) if raw_trail is not None else None
+                state_change = StateChangeProposal(
+                    trail_pct=trail_pct,
+                    reasoning=str(state_change_data.get("reasoning", "")),
+                )
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "ai_analyst: proposed_state_changes parse error: %s — ignoring",
+                    e,
+                )
+
+        return AnalysisReport(
+            analysis=analysis_text,
+            proposed_strategy=proposal,
+            proposed_state_changes=state_change,
+        )
 
 
 # ---------------------------------------------------------------------------

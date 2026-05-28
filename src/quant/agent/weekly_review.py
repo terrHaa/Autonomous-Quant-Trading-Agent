@@ -114,6 +114,10 @@ def run_weekly_review(
                     xsec_skip=state.xsec_skip,
                     hrp_weights=new_hrp,
                     last_hrp_refit_date=for_date.isoformat(),
+                    ai_strategy_names=list(state.ai_strategy_names),
+                    ai_strategy_shadow_until=dict(state.ai_strategy_shadow_until),
+                    trail_high=dict(state.trail_high),
+                    trail_pct=state.trail_pct,
                 )
                 save_ensemble_state(updated_state, path=state_path)
                 refit_notes.append("**HRP weights refit:**")

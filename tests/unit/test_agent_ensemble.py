@@ -269,6 +269,20 @@ def test_trail_high_default_empty() -> None:
     assert EnsembleState().trail_high == {}
 
 
+def test_trail_pct_defaults_to_static_stop_value() -> None:
+    """Default trail_pct = 0.05 → identical to legacy static 5% stop behavior."""
+    assert EnsembleState().trail_pct == 0.05
+
+
+def test_trail_pct_round_trips_through_state(tmp_path: Path) -> None:
+    """trail_pct survives save/load."""
+    state = EnsembleState(trail_pct=0.03)
+    fp = tmp_path / "state.json"
+    save_ensemble_state(state, path=fp)
+    loaded = load_ensemble_state(path=fp)
+    assert loaded.trail_pct == 0.03
+
+
 def test_trail_high_new_entry_seeded_to_signal_price() -> None:
     """A symbol entering for the first time gets trail_high = today's price."""
     out = update_trail_highs(

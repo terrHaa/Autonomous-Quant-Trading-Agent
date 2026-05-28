@@ -411,6 +411,72 @@ def test_daily_rebalance_trail_high_below_signal_uses_it() -> None:
     assert stop_row.stop_price == 199.50
 
 
+def test_daily_rebalance_tighter_trail_pct_locks_in_more_gain() -> None:
+    """trail_pct < stop_loss_pct → trailing stop sits closer to the running high."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    # Trail high = $250, trail_pct = 0.03 → stop = $250 * 0.97 = $242.50.
+    # Signal price = $245 (slight retrace) → stop $242.50 < $245, entry OK.
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 245.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 250.0},
+        trail_pct=0.03,                 # tighter than the 5% initial stop
+        dry_run=True,
+    )
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # 250 * 0.97 = 242.5 (tighter than 250 * 0.95 = 237.5)
+    assert stop_row.stop_price == 242.50
+
+
+def test_daily_rebalance_rejects_trail_pct_wider_than_stop_loss() -> None:
+    """trail_pct > stop_loss_pct violates the operator's per-trade floor; raise."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    with pytest.raises(ValueError, match="trail_pct must be in"):
+        exec_.submit_daily_rebalance(
+            target_weights={"AAPL": 0.10},
+            signal_prices={"AAPL": 200.0},
+            stop_loss_pct=0.05,
+            trail_pct=0.07,            # > 0.05 ceiling
+            dry_run=True,
+        )
+
+
+def test_daily_rebalance_rejects_zero_or_negative_trail_pct() -> None:
+    """trail_pct must be strictly positive."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    for bad in [0.0, -0.01]:
+        with pytest.raises(ValueError, match="trail_pct must be in"):
+            exec_.submit_daily_rebalance(
+                target_weights={"AAPL": 0.10},
+                signal_prices={"AAPL": 200.0},
+                stop_loss_pct=0.05,
+                trail_pct=bad,
+                dry_run=True,
+            )
+
+
+def test_daily_rebalance_fresh_entry_uses_stop_loss_pct_even_with_trail_pct() -> None:
+    """For names without a trail_high, trail_pct is ignored — fresh entry uses
+    stop_loss_pct (operator's 5% floor). Only existing trails use trail_pct."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs={},               # no trail for AAPL → fresh entry
+        trail_pct=0.03,                # would be tighter, but doesn't apply
+        dry_run=True,
+    )
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # 200 * 0.95 = 190 (NOT 200 * 0.97 = 194; trail_pct ignored on fresh entry)
+    assert stop_row.stop_price == 190.0
+
+
 def test_daily_rebalance_signal_anchored_stop_when_no_trail_high() -> None:
     """No trail_high provided → behaves exactly like the legacy entry-stop."""
     client = _FakeTradingClient(equity=100_000)

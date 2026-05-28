@@ -162,6 +162,8 @@ def run_daily_trade(
                 last_hrp_refit_date=state.last_hrp_refit_date,
                 ai_strategy_names=list(state.ai_strategy_names),
                 ai_strategy_shadow_until=still_shadow,
+                trail_high=dict(state.trail_high),
+                trail_pct=state.trail_pct,
             )
             save_ensemble_state(state)
             logger.info(
@@ -241,6 +243,7 @@ def run_daily_trade(
         notes=f"daily trade {today.isoformat()}"
               + (" (dry-run)" if dry_run else ""),
         trail_highs=new_trail,
+        trail_pct=state.trail_pct,
     )
 
     # Persist the new trail map back to disk (skipping on dry-run so test
@@ -260,6 +263,7 @@ def run_daily_trade(
             ai_strategy_names=list(state.ai_strategy_names),
             ai_strategy_shadow_until=dict(state.ai_strategy_shadow_until),
             trail_high=new_trail,
+            trail_pct=state.trail_pct,
         )
         save_ensemble_state(state)
 
@@ -287,6 +291,7 @@ def run_daily_trade(
                 "ai_strategies_graduated_today": graduated,
                 "shadow_targets_today": shadow_targets,
                 "trail_high": dict(new_trail),
+                "trail_pct": state.trail_pct,
             },
             "stop_loss_pct": STOP_LOSS_PCT,
             "max_position_weight": MAX_POSITION_WEIGHT,

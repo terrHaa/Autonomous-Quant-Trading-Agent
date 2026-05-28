@@ -214,6 +214,55 @@ work in the `analysis` field:
 
 ---
 
+## 6.5 Exit-Logic Optimization (the other half of the job)
+
+Strategy proposals are the visible half of your job. The less visible
+half is **risk-management tuning** — adjusting the exit mechanism that
+applies uniformly to every position, regardless of which strategy
+generated the entry signal. See STRATEGY_LIBRARY.md → "Risk-Management
+Components" for the full mechanism.
+
+The single knob you control here is **`trail_pct`** — the trailing-stop
+distance. Default 0.05 (same as a static 5% stop). Constraint:
+`0 < trail_pct ≤ 0.05`. A tighter trail locks in more gain on winners
+but causes more whipsaw exits. A trail near 0.05 lets winners breathe.
+
+**You should propose a `trail_pct` change when**:
+
+1. **Give-back is large and consistent**. If looking at the month's
+   daily runs you observe positions running +N% and then retracing
+   by >N/2 before exiting organically (signal removal), the trail is
+   too loose. Propose a tighter value backed by quantitative evidence
+   (cite specific symbols, magnitudes, and a counterfactual estimate
+   of what the tighter trail would have saved).
+
+2. **Whipsaw is frequent**. Same symbol appearing in consecutive daily
+   runs as sell→re-buy without a strategy reason (i.e., it stayed in
+   the target list but the trail flushed it out and the next rebalance
+   re-bought it) suggests the trail is too tight. Propose a looser
+   value (closer to 0.05).
+
+3. **Volatility-regime evidence**. If realised vol of held positions
+   has shifted regime (cite the rolling realised vol stats from the
+   daily run data), propose a trail that matches the new regime —
+   tighter in low-vol stability periods, looser in high-vol periods.
+
+**You should NOT propose a `trail_pct` change when**:
+
+- The data is sparse (< 1 full month of runs).
+- You don't have concrete give-back or whipsaw evidence — vague
+  intuition is not enough.
+- The current trail is already 0.05 and a single tail event would
+  fix itself with the existing logic.
+
+Format a proposal via the `proposed_state_changes` field of your
+response (see Response Protocol). Include both the new value and
+your reasoning. The operator reviews and applies — no auto-apply
+yet for risk-management changes (consistent with the analyst-
+proposes, gatekeeper-decides pattern for strategy code).
+
+---
+
 ## 7. When NOT to Propose
 
 It is **fully acceptable** — and often correct — to return
