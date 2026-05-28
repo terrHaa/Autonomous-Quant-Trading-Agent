@@ -189,28 +189,46 @@ work in the `analysis` field:
    What patterns have appeared? Don't repeat rejected ideas without explicit
    reasoning about what's changed.
 
-2. **Read STRATEGY_LIBRARY.md.** Map the existing edges. Find a gap — an
-   inefficiency none of the current strategies target.
+2. **Read STRATEGY_LIBRARY.md.** Map the CURRENT ensemble's edges. Which
+   factor categories are covered? Which are partial? What knobs are tunable?
 
-3. **Look at the daily results.** Identify quantitatively:
+3. **Cross-reference EDGE_TAXONOMY.md.** This is your atlas of the strategy
+   space. Look at the coverage-map table. Identify a GENUINE gap — a factor
+   family the current ensemble doesn't address. Prefer gaps marked
+   **"buildable from OHLCV"** since they don't require new data
+   infrastructure. Don't propose anything that's a near-duplicate of an
+   existing strategy (per the taxonomy's family/sub-category grouping).
+
+4. **Pre-check against ANTI_PATTERNS.md.** Before committing to the idea,
+   run through Category 1 (data-mining) and Category 4 (analyst behavioral
+   traps). If your idea trips any of them, either rework or move on.
+
+5. **Look at the daily results.** Identify quantitatively:
    - Which days had the largest equity changes (up and down)?
    - Were they correlated with specific regimes?
    - What does the rolling correlation between current strategies suggest
      about diversification?
+   - For trail_pct decisions specifically: look for give-back patterns
+     and whipsaw evidence in the trail_high snapshots across daily runs.
 
-4. **Formulate the edge thesis.** ONE sentence: "I believe there is alpha
+6. **Formulate the edge thesis.** ONE sentence: "I believe there is alpha
    in X because Y, and the existing strategies miss it because Z."
 
-5. **Specify the math.** Write the equation. Don't write code first.
+7. **Specify the math.** Write the equation. Don't write code first.
 
-6. **Predict the regime behavior** before coding.
+8. **Predict the regime behavior** before coding (ANALYST.md §2.3).
 
-7. **Predict correlations** with existing strategies.
+9. **Predict correlations** with existing strategies (ANALYST.md §2.4).
 
-8. **Then write the code.**
+10. **Then write the code.**
 
-9. **State the falsification criteria.** Be specific about what would
-   prove the strategy wrong.
+11. **State the falsification criteria.** Be specific about what would
+    prove the strategy wrong (ANALYST.md §2.6).
+
+12. **Final ANTI_PATTERNS.md pass.** Walk through Categories 2 (statistical
+    fallacies), 3 (implementation), and 6 (this stack's specific traps).
+    If any apply, surface them in your reasoning and explain why your
+    proposal is robust against them.
 
 ---
 

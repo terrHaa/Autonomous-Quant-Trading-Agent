@@ -17,6 +17,7 @@ from quant.agent.ai_analyst import (
     AnalysisReport,
     StateChangeProposal,
     StrategyProposal,
+    _build_system_prompt,
     _parse_json_response,
 )
 
@@ -170,3 +171,41 @@ def test_analysis_report_state_change_optional() -> None:
     """AnalysisReport's new field defaults to None for backwards-compat."""
     r = AnalysisReport(analysis="x", proposed_strategy=None)
     assert r.proposed_state_changes is None
+
+
+# ---------------------------------------------------------------------------
+# System-prompt assembly — verifies all 5 reference files are loaded
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_loads_all_five_reference_files() -> None:
+    """The analyst's brain = ANALYST.md + STRATEGY_LIBRARY.md + EDGE_TAXONOMY.md
+    + ANTI_PATTERNS.md + MEMORY.md + the response shape. If any file is missing
+    or its header isn't in the prompt, the analyst is operating with reduced
+    context and proposals will be lower quality."""
+    prompt = _build_system_prompt()
+    # Headers from each section (the `# === ... ===` lines we wrap them with).
+    assert "ANALYST.md (your constitution)" in prompt
+    assert "STRATEGY_LIBRARY.md" in prompt
+    assert "EDGE_TAXONOMY.md" in prompt
+    assert "ANTI_PATTERNS.md" in prompt
+    assert "MEMORY.md" in prompt
+    assert "RESPONSE PROTOCOL" in prompt
+
+
+def test_system_prompt_includes_taxonomy_signal_terms() -> None:
+    """Spot-check that EDGE_TAXONOMY's content actually arrived in the prompt
+    (catches the case where the file is renamed or empty)."""
+    prompt = _build_system_prompt()
+    # Distinctive phrases from EDGE_TAXONOMY.md
+    assert "Family 1" in prompt           # the 5-family organisation
+    assert "Coverage Map" in prompt        # the gaps table
+    assert "Decay watch" in prompt         # the dead-anomalies section
+
+
+def test_system_prompt_includes_anti_pattern_signal_terms() -> None:
+    """Spot-check that ANTI_PATTERNS's content actually arrived in the prompt."""
+    prompt = _build_system_prompt()
+    # Distinctive phrases from ANTI_PATTERNS.md
+    assert "Parameter sweeps without theory" in prompt
+    assert "Famous dead anomalies" in prompt

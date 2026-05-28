@@ -45,16 +45,23 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _ANALYST_DIR = _PROJECT_ROOT / "ai-analyst"
 _ANALYST_MD = _ANALYST_DIR / "ANALYST.md"
 _STRATEGY_LIBRARY_MD = _ANALYST_DIR / "STRATEGY_LIBRARY.md"
+_EDGE_TAXONOMY_MD = _ANALYST_DIR / "EDGE_TAXONOMY.md"
+_ANTI_PATTERNS_MD = _ANALYST_DIR / "ANTI_PATTERNS.md"
 _MEMORY_MD = _ANALYST_DIR / "MEMORY.md"
 
 # The system prompt is BUILT at call time by concatenating:
-#   1. ANALYST.md      → constitution (identity, standards, methodology)
-#   2. STRATEGY_LIBRARY.md → canonical catalog of existing strategies
-#   3. MEMORY.md       → append-only log of past proposals and outcomes
-#   4. _RESPONSE_SHAPE → the strict JSON schema the analyst must return
+#   1. ANALYST.md         → constitution (identity, standards, methodology)
+#   2. STRATEGY_LIBRARY.md → canonical catalog of CURRENT active strategies
+#                           + the trail_pct knob and operator hard rules
+#   3. EDGE_TAXONOMY.md   → map of POSSIBLE strategy categories with
+#                           coverage map (what's filled, what's a real gap)
+#   4. ANTI_PATTERNS.md   → failure modes to check against before proposing
+#   5. MEMORY.md          → append-only log of past proposals and outcomes
+#   6. _RESPONSE_SHAPE    → the strict JSON schema the analyst must return
 #
 # This puts the analyst's persistent "brain" in front of every monthly call.
-# The three .md files give it identity, technical context, and history;
+# The five .md files give it identity (1), current state (2), the space of
+# possibilities (3), known failure modes (4), and history (5);
 # the response shape ensures the output is mechanically parseable.
 
 _RESPONSE_SHAPE = """\
@@ -100,14 +107,20 @@ def _read_file(path: Path) -> str:
 
 
 def _build_system_prompt() -> str:
-    """Concatenate the three persistent .md files + response shape."""
+    """Concatenate the five persistent .md files + response shape."""
     analyst_md = _read_file(_ANALYST_MD)
     library_md = _read_file(_STRATEGY_LIBRARY_MD)
+    edge_md = _read_file(_EDGE_TAXONOMY_MD)
+    anti_md = _read_file(_ANTI_PATTERNS_MD)
     memory_md = _read_file(_MEMORY_MD)
     return (
         f"# === ANALYST.md (your constitution) ===\n\n{analyst_md}\n\n"
-        f"# === STRATEGY_LIBRARY.md (active strategies — do not duplicate edges) ===\n\n"
+        f"# === STRATEGY_LIBRARY.md (active strategies + tunable knobs) ===\n\n"
         f"{library_md}\n\n"
+        f"# === EDGE_TAXONOMY.md (the space of possible edges + coverage map) ===\n\n"
+        f"{edge_md}\n\n"
+        f"# === ANTI_PATTERNS.md (failure modes — check against before proposing) ===\n\n"
+        f"{anti_md}\n\n"
         f"# === MEMORY.md (your own past proposals + outcomes) ===\n\n{memory_md}\n\n"
         f"# === RESPONSE PROTOCOL ===\n\n{_RESPONSE_SHAPE}"
     )
