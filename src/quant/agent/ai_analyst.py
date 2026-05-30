@@ -48,6 +48,7 @@ _STRATEGY_LIBRARY_MD = _ANALYST_DIR / "STRATEGY_LIBRARY.md"
 _EDGE_TAXONOMY_MD = _ANALYST_DIR / "EDGE_TAXONOMY.md"
 _ANTI_PATTERNS_MD = _ANALYST_DIR / "ANTI_PATTERNS.md"
 _MEMORY_MD = _ANALYST_DIR / "MEMORY.md"
+_WEEKLY_ANALYST_MD = _ANALYST_DIR / "WEEKLY_ANALYST.md"
 
 # The system prompt is BUILT at call time by concatenating:
 #   1. ANALYST.md         → constitution (identity, standards, methodology)
@@ -126,6 +127,32 @@ def _build_system_prompt() -> str:
     )
 
 
+def _build_weekly_system_prompt() -> str:
+    """Build the WEEKLY analyst's system prompt — narrower than monthly.
+
+    Weekly mode does NOT propose strategies or state changes; it writes a
+    performance deep-dive. The prompt loads only the files the weekly
+    analyst actually needs (saving ~7k tokens / ~$0.10/week vs reusing
+    the monthly system prompt verbatim).
+    """
+    weekly_md = _read_file(_WEEKLY_ANALYST_MD)
+    library_md = _read_file(_STRATEGY_LIBRARY_MD)
+    memory_md = _read_file(_MEMORY_MD)
+    return (
+        f"# === WEEKLY_ANALYST.md (your role for this call) ===\n\n{weekly_md}\n\n"
+        f"# === STRATEGY_LIBRARY.md (the ensemble you are analyzing) ===\n\n"
+        f"{library_md}\n\n"
+        f"# === MEMORY.md (history from the monthly analyst — context only) ===\n\n"
+        f"{memory_md}\n\n"
+        "# === RESPONSE PROTOCOL ===\n\n"
+        "Return raw markdown ONLY — no JSON, no fences. The markdown will be "
+        "embedded directly into the weekly review email. Follow the paragraph "
+        "structure prescribed in WEEKLY_ANALYST.md §2. No preamble. No "
+        "sign-off. Begin with the headline paragraph and end with the watch "
+        "items.\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -159,6 +186,17 @@ class AnalysisReport:
     analysis: str                         # qualitative narrative
     proposed_strategy: StrategyProposal | None  # None if no proposal
     proposed_state_changes: StateChangeProposal | None = None  # None if no tuning
+
+
+@dataclass
+class WeeklyAnalysisReport:
+    """Output of one weekly performance-review call.
+
+    The weekly analyst does NOT propose strategies or state changes; its
+    only deliverable is a structured deep-dive narrative the operator
+    reads Saturday morning. See WEEKLY_ANALYST.md for the structure.
+    """
+    narrative: str   # markdown body, ~4-6 paragraphs per WEEKLY_ANALYST.md §2
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +400,69 @@ class AIAnalyst:
             proposed_strategy=proposal,
             proposed_state_changes=state_change,
         )
+
+    def analyze_weekly(
+        self,
+        *,
+        daily_runs: list[dict[str, Any]],
+        weekly_metrics: dict[str, Any],
+        hrp_diagnostic: dict[str, Any] | None = None,
+    ) -> WeeklyAnalysisReport:
+        """Call Claude to write a deep-dive analysis of the past week.
+
+        Returns a markdown narrative the weekly review email embeds verbatim.
+        Does NOT propose strategies or state changes — that's the monthly
+        analyst's job (see WEEKLY_ANALYST.md §3).
+
+        Parameters
+        ----------
+        daily_runs
+            Daily run payloads from the past week (load_daily_run).
+        weekly_metrics
+            Pre-computed performance metrics for the week — return, Sharpe,
+            max DD, win rate, attribution, concentration. See
+            weekly_review._compute_weekly_metrics for the canonical builder.
+        hrp_diagnostic
+            Output of refit_hrp_weights' diag dict (per-strategy backtest
+            stats, weight before/after). Helps the analyst reason about
+            which strategies are gaining or losing weight and why.
+        """
+        runs_table = _summarise_runs(daily_runs)
+        metrics_json = json.dumps(weekly_metrics, indent=2, default=str)
+        hrp_json = json.dumps(hrp_diagnostic or {}, indent=2, default=str)
+
+        user_msg = (
+            f"## Past week's daily runs\n\n{runs_table}\n\n"
+            f"## Pre-computed weekly metrics\n\n```json\n{metrics_json}\n```\n\n"
+            f"## HRP refit diagnostic (this Saturday's refit)\n\n```json\n{hrp_json}\n```\n\n"
+            "---\n\nWrite the weekly performance deep-dive per "
+            "WEEKLY_ANALYST.md §2. Markdown only, no JSON, no fences. "
+            "Begin with the headline paragraph; end with the watch items."
+        )
+        logger.info(
+            "ai_analyst: weekly call with %d daily runs", len(daily_runs)
+        )
+
+        system_prompt = _build_weekly_system_prompt()
+        message = self._client.messages.create(
+            model=self._model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        narrative = message.content[0].text.strip()
+        # Strip accidental code fences if the model wrapped the output.
+        if narrative.startswith("```"):
+            lines = narrative.splitlines()
+            # Drop opening fence + optional language tag.
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            # Drop closing fence.
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            narrative = "\n".join(lines).strip()
+
+        return WeeklyAnalysisReport(narrative=narrative)
 
 
 # ---------------------------------------------------------------------------

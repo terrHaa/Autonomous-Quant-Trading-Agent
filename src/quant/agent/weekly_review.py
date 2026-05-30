@@ -24,6 +24,8 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
+import math
+
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import (
@@ -48,6 +50,98 @@ logger = logging.getLogger(__name__)
 HRP_REFIT_LOOKBACK_DAYS = 365   # calendar days; ~252 trading days
 
 
+def _compute_weekly_metrics(
+    daily_runs: list[dict],
+    equity_curve: dict[date, float],
+) -> dict:
+    """Compute the headline numbers the weekly AI analyst needs.
+
+    Aims for SIGNAL not VOLUME — the metrics here are what a human PM would
+    glance at first. Each value is also passed verbatim to the AI so it
+    can quote magnitudes in the narrative.
+    """
+    if not equity_curve:
+        return {"n_days": 0, "note": "no equity data this week"}
+
+    # Sort by date so daily returns line up.
+    days = sorted(equity_curve)
+    equities = [equity_curve[d] for d in days]
+    n = len(equities)
+
+    # Daily returns are equity[t+1] / equity[t] - 1. Each day's recorded
+    # equity is BEFORE-trade for that day, so equity[d+1] - equity[d]
+    # captures day d's net P&L from holding + intraday trade.
+    daily_returns: list[float] = []
+    for i in range(1, n):
+        prev = equities[i - 1]
+        if prev > 0:
+            daily_returns.append(equities[i] / prev - 1.0)
+
+    total_return = (equities[-1] / equities[0] - 1.0) if equities[0] > 0 else 0.0
+
+    # Win rate: fraction of daily returns > 0
+    n_pos = sum(1 for r in daily_returns if r > 0)
+    n_neg = sum(1 for r in daily_returns if r < 0)
+    win_rate = n_pos / len(daily_returns) if daily_returns else 0.0
+
+    # Annualized Sharpe (252 trading days). For a short week the CI is
+    # huge — the analyst is told to acknowledge this.
+    if len(daily_returns) > 1:
+        mean = sum(daily_returns) / len(daily_returns)
+        var = sum((r - mean) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+        std = math.sqrt(var)
+        sharpe = (mean / std) * math.sqrt(252) if std > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    # Max drawdown intra-week (running peak − trough) / peak.
+    peak = equities[0]
+    max_dd = 0.0
+    for e in equities:
+        peak = max(peak, e)
+        dd = (e - peak) / peak if peak > 0 else 0.0
+        max_dd = min(max_dd, dd)
+
+    # Position-attribution: which symbols moved the most over the week?
+    # We diff each name's signal_price across the week (signal_price =
+    # prior close, so diff captures the week's price action on names we
+    # actually rebalanced into).
+    first_run = sorted(daily_runs, key=lambda r: r.get("date", ""))[0]
+    last_run = sorted(daily_runs, key=lambda r: r.get("date", ""))[-1]
+    first_prices = first_run.get("signal_prices", {})
+    last_prices = last_run.get("signal_prices", {})
+    moves: list[tuple[str, float]] = []
+    for sym, p0 in first_prices.items():
+        if sym in last_prices and p0 > 0:
+            move = last_prices[sym] / p0 - 1.0
+            moves.append((sym, move))
+    moves.sort(key=lambda x: x[1])
+    top_losers = [{"symbol": s, "move_pct": m} for s, m in moves[:5]]
+    top_gainers = [{"symbol": s, "move_pct": m} for s, m in moves[-5:][::-1]]
+
+    # Concentration: top-3 weights as % of equity from latest run.
+    targets = last_run.get("target_weights", {})
+    sorted_w = sorted(targets.values(), reverse=True)
+    top3_concentration = sum(sorted_w[:3]) if sorted_w else 0.0
+
+    return {
+        "n_days": n,
+        "n_daily_returns": len(daily_returns),
+        "equity_start": round(equities[0], 2),
+        "equity_end": round(equities[-1], 2),
+        "total_return_pct": round(total_return * 100, 4),
+        "ann_sharpe": round(sharpe, 3),
+        "max_drawdown_pct": round(max_dd * 100, 4),
+        "win_rate_pct": round(win_rate * 100, 2),
+        "n_winning_days": n_pos,
+        "n_losing_days": n_neg,
+        "top_gainers_week": top_gainers,
+        "top_losers_week": top_losers,
+        "top3_concentration_pct": round(top3_concentration * 100, 2),
+        "n_positions_latest_run": len(targets),
+    }
+
+
 def run_weekly_review(
     *,
     for_date: date | None = None,
@@ -56,6 +150,7 @@ def run_weekly_review(
     config: Config | None = None,
     state_path: Path | None = None,
     refit_hrp: bool = True,
+    enable_ai_analyst: bool = True,
     # Test-injection points:
     cache: BarsCache | None = None,
     universe: list[str] | None = None,
@@ -82,6 +177,7 @@ def run_weekly_review(
 
     # -------- 2. HRP refit (best-effort; failure surfaces in the email) --------
     refit_notes: list[str] = []
+    hrp_diag: dict = {}     # captured here so the AI analyst can reference it
     if refit_hrp:
         try:
             state = load_ensemble_state(path=state_path)
@@ -103,6 +199,7 @@ def run_weekly_review(
                     bars=bars,
                     config=config,
                 )
+                hrp_diag = diag   # surface for the AI analyst
                 # Persist the new weights + bump the refit date.
                 updated_state = EnsembleState(
                     sma_fast=state.sma_fast, sma_slow=state.sma_slow,
@@ -148,7 +245,32 @@ def run_weekly_review(
             refit_notes.append(f"HRP refit failed: {type(e).__name__}: {e}")
             logger.exception("HRP refit failed")
 
-    # -------- 3. Render + email --------
+    # -------- 3. AI deep-dive (Claude writes the qualitative analysis) ------
+    # Pre-compute metrics so the analyst has structured numbers to anchor
+    # claims; pass the HRP diagnostic so it can reason about weight shifts.
+    # Disabled in tests via enable_ai_analyst=False to avoid hitting the API.
+    deep_dive_md = ""
+    if enable_ai_analyst and daily_runs:
+        try:
+            from quant.agent.ai_analyst import AIAnalyst   # lazy: optional dep
+            metrics = _compute_weekly_metrics(daily_runs, equity_curve)
+            analyst = AIAnalyst()
+            weekly_report = analyst.analyze_weekly(
+                daily_runs=daily_runs,
+                weekly_metrics=metrics,
+                hrp_diagnostic=hrp_diag,
+            )
+            deep_dive_md = weekly_report.narrative
+        except Exception as e:
+            # AI failure must NOT prevent the rest of the report from sending.
+            # Surface it inline so the operator notices.
+            deep_dive_md = (
+                f"_AI deep-dive failed: {type(e).__name__}: {e}. "
+                "The numeric summary and HRP refit below are still valid._"
+            )
+            logger.exception("weekly AI analyst call failed")
+
+    # -------- 4. Render + email --------
     if not daily_runs and not refit_notes:
         notes = (
             f"No daily run records found between "
@@ -156,7 +278,14 @@ def run_weekly_review(
             f"{for_date.isoformat()}, and HRP refit was skipped."
         )
     else:
-        notes = "\n".join(refit_notes) if refit_notes else ""
+        # Order: deep-dive first (top of email = highest signal), then
+        # mechanical refit notes below.
+        parts: list[str] = []
+        if deep_dive_md:
+            parts.append("## AI Weekly Deep-Dive\n\n" + deep_dive_md)
+        if refit_notes:
+            parts.append("## HRP Refit & Per-Strategy Stats\n\n" + "\n".join(refit_notes))
+        notes = "\n\n---\n\n".join(parts)
         if not daily_runs:
             notes = (
                 "No daily run records this week. (Agent likely wasn't running.)\n\n"

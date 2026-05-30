@@ -56,6 +56,75 @@ def _save_daily(tmp_path: Path, d: date, equity: float = 100_000.0) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Weekly metrics computation — feeds the AI deep-dive
+# ---------------------------------------------------------------------------
+
+
+def test_weekly_metrics_empty_when_no_equity_data() -> None:
+    out = weekly_mod._compute_weekly_metrics(daily_runs=[], equity_curve={})
+    assert out["n_days"] == 0
+
+
+def test_weekly_metrics_total_return_and_win_rate() -> None:
+    """Two days: 100k → 101k = +1%. 3 daily returns possible only if n=4."""
+    eq = {
+        date(2024, 6, 3): 100_000.0,   # Mon
+        date(2024, 6, 4): 100_500.0,   # Tue: +0.5%
+        date(2024, 6, 5): 100_200.0,   # Wed: -0.3%
+        date(2024, 6, 6): 101_000.0,   # Thu: +0.8%
+    }
+    runs = [
+        {"date": "2024-06-03", "signal_prices": {"AAPL": 200.0, "MSFT": 400.0}, "target_weights": {"AAPL": 0.2, "MSFT": 0.2}},
+        {"date": "2024-06-06", "signal_prices": {"AAPL": 210.0, "MSFT": 396.0}, "target_weights": {"AAPL": 0.2, "MSFT": 0.2}},
+    ]
+    m = weekly_mod._compute_weekly_metrics(runs, eq)
+
+    assert m["n_days"] == 4
+    assert m["n_daily_returns"] == 3
+    assert m["equity_start"] == 100_000.0
+    assert m["equity_end"] == 101_000.0
+    # Total return = 101000 / 100000 - 1 = 0.01 = 1%
+    assert abs(m["total_return_pct"] - 1.0) < 0.001
+    # 2 of 3 daily returns positive → 66.67%
+    assert abs(m["win_rate_pct"] - 66.6667) < 0.01
+    # Top gainer: AAPL (+5%); top loser: MSFT (-1%).
+    assert m["top_gainers_week"][0]["symbol"] == "AAPL"
+    assert m["top_losers_week"][0]["symbol"] == "MSFT"
+
+
+def test_weekly_metrics_max_drawdown_intra_week() -> None:
+    """Peak at day 2, trough at day 3, recovery at day 4. Max DD = trough/peak - 1."""
+    eq = {
+        date(2024, 6, 3): 100_000.0,
+        date(2024, 6, 4): 102_000.0,   # peak
+        date(2024, 6, 5):  98_000.0,   # trough: (98000/102000 - 1) = -3.92%
+        date(2024, 6, 6): 101_000.0,
+    }
+    runs = [{"date": "2024-06-03", "signal_prices": {}, "target_weights": {}}]
+    m = weekly_mod._compute_weekly_metrics(runs, eq)
+    # max_drawdown_pct is negative
+    assert m["max_drawdown_pct"] < -3.9
+    assert m["max_drawdown_pct"] > -4.0
+
+
+def test_weekly_metrics_concentration_from_last_run() -> None:
+    eq = {date(2024, 6, 6): 100_000.0}
+    runs = [{
+        "date": "2024-06-06",
+        "signal_prices": {},
+        "target_weights": {"AAPL": 0.1, "MSFT": 0.07, "NVDA": 0.05, "OTHER": 0.03},
+    }]
+    m = weekly_mod._compute_weekly_metrics(runs, eq)
+    # Top 3: AAPL + MSFT + NVDA = 0.22 → 22%
+    assert abs(m["top3_concentration_pct"] - 22.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Weekly review wiring tests (existing — extended for enable_ai_analyst)
+# ---------------------------------------------------------------------------
+
+
 def test_weekly_review_emails_when_runs_exist(tmp_path: Path) -> None:
     """Five days of records → weekly email goes out with aggregate stats."""
     base = date(2024, 6, 7)   # Friday
@@ -67,6 +136,7 @@ def test_weekly_review_emails_when_runs_exist(tmp_path: Path) -> None:
     subject = weekly_mod.run_weekly_review(
         for_date=base, runs_dir=tmp_path, email_sender=sender,
         refit_hrp=False,
+        enable_ai_analyst=False,
     )
     assert len(sender.sent) == 1
     assert "weekly review" in subject
@@ -80,6 +150,7 @@ def test_weekly_review_still_emails_when_no_runs(tmp_path: Path) -> None:
     weekly_mod.run_weekly_review(
         for_date=date(2024, 6, 7), runs_dir=tmp_path, email_sender=sender,
         refit_hrp=False,
+        enable_ai_analyst=False,
     )
     assert len(sender.sent) == 1
     # No-data note should appear in the body.
@@ -143,6 +214,7 @@ def test_weekly_review_refits_hrp_when_enabled(monkeypatch, tmp_path: Path) -> N
         state_path=state_path,
         cache=_FakeCache(),
         universe=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+        enable_ai_analyst=False,
     )
 
     # The new weights must have landed on disk.

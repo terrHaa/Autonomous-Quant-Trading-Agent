@@ -17,7 +17,9 @@ from quant.agent.ai_analyst import (
     AnalysisReport,
     StateChangeProposal,
     StrategyProposal,
+    WeeklyAnalysisReport,
     _build_system_prompt,
+    _build_weekly_system_prompt,
     _parse_json_response,
 )
 
@@ -209,3 +211,64 @@ def test_system_prompt_includes_anti_pattern_signal_terms() -> None:
     # Distinctive phrases from ANTI_PATTERNS.md
     assert "Parameter sweeps without theory" in prompt
     assert "Famous dead anomalies" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Weekly analyst — narrower prompt, narrative-only response
+# ---------------------------------------------------------------------------
+
+
+def test_weekly_system_prompt_loads_weekly_role_not_monthly() -> None:
+    """Weekly prompt should NOT include EDGE_TAXONOMY or ANTI_PATTERNS
+    (saves ~7k tokens; those files are about proposing new edges and the
+    weekly analyst is explicitly forbidden from doing that)."""
+    prompt = _build_weekly_system_prompt()
+    assert "WEEKLY_ANALYST.md" in prompt
+    assert "STRATEGY_LIBRARY.md" in prompt
+    assert "MEMORY.md" in prompt
+    # These should NOT be present in weekly mode:
+    assert "EDGE_TAXONOMY" not in prompt
+    assert "ANTI_PATTERNS" not in prompt
+    # Distinctive content from WEEKLY_ANALYST.md
+    assert "performance analyst" in prompt.lower()
+    assert "Forbidden behaviors" in prompt or "forbidden" in prompt.lower()
+
+
+def test_weekly_system_prompt_demands_markdown_not_json() -> None:
+    """The weekly response shape says raw markdown, not JSON — operators
+    embed the narrative directly in email."""
+    prompt = _build_weekly_system_prompt()
+    assert "markdown ONLY" in prompt or "markdown only" in prompt.lower()
+    assert "no JSON" in prompt or "no json" in prompt.lower()
+
+
+def test_analyze_weekly_returns_report_with_narrative() -> None:
+    """analyze_weekly takes daily runs + metrics and returns markdown narrative."""
+    raw_markdown = (
+        "## Headline\n\n"
+        "The week returned +1.2% with 18/25 positions positive...\n\n"
+        "## Attribution\n\n"
+        "NVDA contributed +0.4%, AVGO +0.3%..."
+    )
+    analyst = _fake_analyst(raw_markdown)
+    report = analyst.analyze_weekly(
+        daily_runs=[{"date": "2026-05-29", "execution_report": {}}],
+        weekly_metrics={"total_return_pct": 1.2},
+        hrp_diagnostic={},
+    )
+    assert isinstance(report, WeeklyAnalysisReport)
+    assert "+1.2%" in report.narrative
+    assert "NVDA" in report.narrative
+
+
+def test_analyze_weekly_strips_markdown_fences() -> None:
+    """If the model wraps the response in ```markdown … ``` fences, we strip them."""
+    raw = "```markdown\n## Headline\n\nText here.\n```"
+    analyst = _fake_analyst(raw)
+    report = analyst.analyze_weekly(
+        daily_runs=[],
+        weekly_metrics={},
+        hrp_diagnostic={},
+    )
+    assert report.narrative.startswith("## Headline")
+    assert "```" not in report.narrative
