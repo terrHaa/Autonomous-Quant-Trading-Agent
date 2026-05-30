@@ -456,6 +456,7 @@ def cli_run_trade() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     parser = argparse.ArgumentParser(description="Run the agent's daily trade.")
     parser.add_argument(
@@ -476,6 +477,7 @@ def cli_run_report() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     parser = argparse.ArgumentParser(description="Send the agent's daily report.")
     parser.add_argument(

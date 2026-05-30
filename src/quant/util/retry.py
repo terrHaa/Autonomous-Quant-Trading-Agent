@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,11 @@ def retry_on_transient(
             if attempt_idx == total_attempts - 1:
                 break
             wait = backoffs[attempt_idx]
-            logger.warning(
+            # Per-retry messages are logged at INFO (stdout via launchd's
+            # .out file), NOT WARNING (which would land in .err and trip
+            # the audit's error_logs check on every flaky-but-successful
+            # run). The genuine WARNING comes below if ALL retries fail.
+            logger.info(
                 "%s: transient error on attempt %d/%d (%s: %s); "
                 "retrying in %.1fs",
                 description, attempt_idx + 1, total_attempts,
@@ -90,7 +95,11 @@ def retry_on_transient(
             )
             time.sleep(wait)
 
-    # All attempts exhausted; re-raise the last transient error so the
-    # caller's normal error path runs (failure email, exit-1, etc.).
+    # All attempts exhausted — this is the real failure. WARN so the .err
+    # log captures it for the audit to flag.
     assert last_exc is not None  # for type checker
+    logger.warning(
+        "%s: all %d retries exhausted; re-raising %s",
+        description, total_attempts, type(last_exc).__name__,
+    )
     raise last_exc

@@ -225,8 +225,24 @@ class AlpacaExecutor:
         *,
         dry_run: bool = False,
         notes: str = "",
+        i_understand_no_stops: bool = False,
     ) -> ExecutionReport:
         """Bring current positions to match the target weight book.
+
+        .. warning::
+
+           **THIS METHOD BYPASSES THE 5% STOP-LOSS RULE.** It submits
+           bare market orders without atomic protective stops. The
+           autonomous agent uses :meth:`submit_daily_rebalance` instead,
+           which attaches a GTC stop to every entry. This method exists
+           for the original pre-agent walk-forward research flow and
+           ad-hoc operator scripts that explicitly do their own risk
+           management.
+
+           Pass ``i_understand_no_stops=True`` to actually submit live;
+           otherwise a ``PermissionError`` is raised before any order
+           hits the broker. ``dry_run=True`` still works without the
+           flag (no orders submitted, just the diff report).
 
         Parameters
         ----------
@@ -246,12 +262,23 @@ class AlpacaExecutor:
         notes
             Free-text note saved on the report (e.g., "session 2024-12-31
             after walk-forward pass").
+        i_understand_no_stops
+            Explicit opt-in to bypass the 5% stop rule. Required for any
+            non-dry-run submission. Catches the case where someone wires
+            this method into a production flow by mistake.
 
         Returns
         -------
         ExecutionReport
             Full structured record of what was proposed and submitted.
         """
+        if not dry_run and not i_understand_no_stops:
+            raise PermissionError(
+                "submit_to_match_targets bypasses the 5% stop-loss rule. "
+                "Pass i_understand_no_stops=True to acknowledge, or use "
+                "submit_daily_rebalance for the agent's safe flow with "
+                "atomic GTC stops."
+            )
         # ---- 1. Snapshot account + positions ---------------------------
         equity = self.get_equity()
         positions = self.get_positions()

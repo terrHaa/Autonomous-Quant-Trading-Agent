@@ -106,6 +106,22 @@ def test_save_overwrites_existing_report(tmp_path: Path) -> None:
     assert payload["metrics"]["total_return_pct"] == 1.5
 
 
+def test_save_is_atomic_no_orphan_tmp_files(tmp_path: Path) -> None:
+    """save_weekly_report uses tempfile+rename → no partial-write artifacts.
+
+    After a successful save, the directory contains exactly the final
+    file (no .tmp orphans). A future audit on this directory shouldn't
+    trip over half-written state.
+    """
+    save_weekly_report(
+        week_ending=date(2026, 5, 29), narrative="x",
+        metrics={}, weekly_dir=tmp_path,
+    )
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert files[0].name == "2026-05-29.json"
+
+
 def test_load_ignores_non_iso_filenames(tmp_path: Path) -> None:
     """Stray files like .DS_Store or .gitignore shouldn't crash the loader."""
     (tmp_path / ".DS_Store").write_text("junk")

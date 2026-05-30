@@ -41,15 +41,16 @@ import json
 import logging
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import build_strategies, load_ensemble_state
-from quant.agent.log import DEFAULT_RUNS_DIR, load_daily_run
+from quant.agent.log import load_daily_run
 from quant.data.universe import load_top50_snapshot
 
 logger = logging.getLogger(__name__)
@@ -138,9 +139,10 @@ def _check_broker_reconciliation(
     executor: Any = None,
 ) -> AuditCheck:
     """Account active, positions all stopped (GTC), qty matches run record."""
-    from quant.execution.alpaca_executor import AlpacaExecutor
     from alpaca.trading.enums import QueryOrderStatus
     from alpaca.trading.requests import GetOrdersRequest
+
+    from quant.execution.alpaca_executor import AlpacaExecutor
 
     ex = executor or AlpacaExecutor()
 
@@ -302,7 +304,15 @@ def _check_recent_error_logs(
     log_dir: Path | None = None,
     hours: int = 26,
 ) -> AuditCheck:
-    """Any non-empty .err log modified within the past `hours`?"""
+    """Any non-empty .err log with REAL errors modified within `hours`?
+
+    A "real error" means lines containing ERROR, Traceback, Exception,
+    or Failed (case-sensitive). We deliberately IGNORE WARNING-only logs
+    because the retry layer writes WARNING on each transient attempt;
+    when those retries succeed, the run was fine but the .err file is
+    non-empty. Flagging those would cause a false-positive on every
+    network-flaky run.
+    """
     log_dir = log_dir or Path("data/agent/launchd-logs")
     if not log_dir.exists():
         return AuditCheck(
@@ -310,24 +320,48 @@ def _check_recent_error_logs(
             passed=True,
             message=f"no log directory at {log_dir} (clean install)",
         )
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(tz=UTC) - timedelta(hours=hours)
+    # Case-sensitive markers. We rely on the CLI entry points routing
+    # INFO/WARNING to stdout (logging.basicConfig(stream=sys.stdout)),
+    # so the .err file should ONLY contain uncaught Python exceptions
+    # (which always include "Traceback (most recent call last):") plus
+    # any explicit print()-to-stderr from _email_failure. These
+    # markers cover both cases.
+    error_markers = ("Traceback", "ERROR")
     flagged: list[dict[str, Any]] = []
     for err_file in log_dir.glob("*.err"):
         stat = err_file.stat()
-        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-        if stat.st_size > 0 and mtime > cutoff:
+        mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        if stat.st_size == 0 or mtime <= cutoff:
+            continue
+        # Scan the file for real error markers — skip WARNING-only files
+        # (retry-layer chatter that resolved successfully).
+        try:
+            text = err_file.read_text(errors="replace")
+        except OSError:
+            text = ""
+        has_real_error = any(marker in text for marker in error_markers)
+        if has_real_error:
+            # Capture a short excerpt of the first error line for the report.
+            first_err_line = next(
+                (ln for ln in text.splitlines()
+                 if any(m in ln for m in error_markers)),
+                "",
+            )
             flagged.append({
                 "name": err_file.name,
                 "size_bytes": stat.st_size,
                 "modified": mtime.isoformat(),
+                "first_error_line": first_err_line[:200],
             })
     passed = not flagged
     return AuditCheck(
         name="error_logs",
         passed=passed,
         message=(
-            f"no recent (<{hours}h) errors in launchd logs" if passed else
-            f"{len(flagged)} launchd .err logs with content in last {hours}h: "
+            f"no real errors in launchd logs in last {hours}h "
+            "(WARNINGs from retry layer ignored)" if passed else
+            f"{len(flagged)} launchd .err logs with REAL errors in last {hours}h: "
             f"{[f['name'] for f in flagged]}"
         ),
         details={"flagged": flagged, "log_dir": str(log_dir), "hours": hours},
@@ -335,13 +369,24 @@ def _check_recent_error_logs(
 
 
 def _check_alpaca_connectivity(executor: Any = None) -> AuditCheck:
-    """Single cheap broker round-trip to verify network reachability."""
+    """Single cheap broker round-trip to verify network reachability.
+
+    Wrapped in the retry layer so a one-shot TLS handshake hiccup
+    doesn't fail the audit on an otherwise-healthy pipeline. Aligns
+    with how the daily-trade routine handles the same flake.
+    """
+    import requests.exceptions as _req_exc
+
     from quant.execution.alpaca_executor import AlpacaExecutor
+    from quant.util.retry import retry_on_transient
 
     ex = executor or AlpacaExecutor()
     try:
-        # account fetch already exercises auth + network — minimal payload.
-        acct = ex._client.get_account()
+        acct = retry_on_transient(
+            lambda: ex._client.get_account(),
+            transient=(_req_exc.ConnectionError, _req_exc.SSLError, _req_exc.Timeout),
+            description="audit connectivity check",
+        )
         return AuditCheck(
             name="connectivity",
             passed=True,
@@ -431,7 +476,7 @@ def run_daily_audit(
 
     report = AuditReport(
         for_date=for_date.isoformat(),
-        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+        timestamp=datetime.now(tz=UTC).isoformat(),
         checks=checks,
     )
 
@@ -514,6 +559,7 @@ def cli_run() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     parser = argparse.ArgumentParser(description="Audit the trading pipeline.")
     parser.add_argument(

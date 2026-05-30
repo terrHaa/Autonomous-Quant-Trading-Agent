@@ -24,10 +24,10 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import sys
+from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
-
-from dataclasses import asdict
 
 from quant.agent.ai_analyst import (
     AIAnalyst,
@@ -131,7 +131,7 @@ def _compute_monthly_metrics(
 
     # Day-of-week breakdown: Mon=0..Fri=4. Mean return + win rate per dow.
     dow_buckets: dict[int, list[float]] = {k: [] for k in range(5)}
-    for d, r in zip(return_dates, daily_returns):
+    for d, r in zip(return_dates, daily_returns, strict=True):
         if d.weekday() < 5:   # exclude weekends defensively (shouldn't occur)
             dow_buckets[d.weekday()].append(r)
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
@@ -153,7 +153,10 @@ def _compute_monthly_metrics(
         r_next = daily_returns[1:]
         m_prev = sum(r_prev) / len(r_prev)
         m_next = sum(r_next) / len(r_next)
-        cov = sum((a - m_prev) * (b - m_next) for a, b in zip(r_prev, r_next)) / (len(r_prev) - 1)
+        cov = sum(
+            (a - m_prev) * (b - m_next)
+            for a, b in zip(r_prev, r_next, strict=True)
+        ) / (len(r_prev) - 1)
         s_prev = math.sqrt(sum((a - m_prev) ** 2 for a in r_prev) / (len(r_prev) - 1))
         s_next = math.sqrt(sum((b - m_next) ** 2 for b in r_next) / (len(r_next) - 1))
         autocorr1 = cov / (s_prev * s_next) if s_prev > 0 and s_next > 0 else 0.0
@@ -580,7 +583,7 @@ def run_monthly_review(
                 sandbox_summary = "(no proposal made)"
             elif ai_report.proposed_strategy.name in (current_state.ai_strategy_names or []):
                 outcome_label = "duplicate_skipped"
-                sandbox_summary = f"Name already active — skipped sandbox."
+                sandbox_summary = "Name already active — skipped sandbox."
             elif bars is None or bars.empty:
                 outcome_label = "no_bars"
                 sandbox_summary = "Bars unavailable — sandbox not run."
@@ -641,6 +644,7 @@ def cli_run() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     parser = argparse.ArgumentParser(description="Send the agent's monthly review.")
     parser.add_argument("--for-date", default=None, help="ISO date; defaults to today")

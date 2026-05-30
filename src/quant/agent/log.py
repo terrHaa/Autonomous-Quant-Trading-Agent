@@ -42,6 +42,39 @@ DEFAULT_RUNS_DIR = _PROJECT_ROOT / "data" / "agent" / "runs"
 DEFAULT_WEEKLY_DIR = _PROJECT_ROOT / "data" / "agent" / "weekly_reports"
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text to ``path`` atomically: tempfile in same dir, then rename.
+
+    Prevents partial-file corruption if the process is killed mid-write —
+    a real risk for state files that the daily-trade routine clobbers on
+    every fire. ``os.replace`` is atomic on POSIX when source and dest
+    are on the same filesystem (guaranteed here since the tempfile lives
+    in the same parent directory).
+    """
+    import os
+    import tempfile
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # Write to a sibling temp file…
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        # …then atomically swap into place. On crash before this point,
+        # the original file is untouched; the tmp file is orphaned but
+        # harmless (next run cleans it up via tempfile's own logic).
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        # Best-effort cleanup of the tmp file if rename never happened.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def save_daily_run(
     *,
     run_date: date,
@@ -68,7 +101,7 @@ def save_daily_run(
     }
     # default=str lets datetime, date, and other non-JSON-native types
     # serialize cleanly without us hand-writing a converter for each.
-    out_path.write_text(json.dumps(payload, default=str, indent=2))
+    _atomic_write_text(out_path, json.dumps(payload, default=str, indent=2))
     return out_path
 
 
@@ -83,29 +116,6 @@ def load_daily_run(
     if not path.exists():
         return None
     return json.loads(path.read_text())
-
-
-def list_recent_runs(
-    *,
-    runs_dir: Path | None = None,
-    limit: int | None = None,
-) -> list[date]:
-    """List run dates in the directory, newest first.
-
-    ``limit=10`` returns the 10 most recent. ``None`` returns all.
-    """
-    out_dir = runs_dir or DEFAULT_RUNS_DIR
-    if not out_dir.exists():
-        return []
-    dates: list[date] = []
-    for p in out_dir.glob("*.json"):
-        try:
-            dates.append(date.fromisoformat(p.stem))
-        except ValueError:
-            # Stray file with a non-date stem — ignore rather than crash.
-            continue
-    dates.sort(reverse=True)
-    return dates[:limit] if limit else dates
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +148,7 @@ def save_weekly_report(
         "metrics": metrics,
         "hrp_diagnostic": hrp_diagnostic or {},
     }
-    out_path.write_text(json.dumps(payload, default=str, indent=2))
+    _atomic_write_text(out_path, json.dumps(payload, default=str, indent=2))
     return out_path
 
 

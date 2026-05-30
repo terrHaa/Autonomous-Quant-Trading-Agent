@@ -186,10 +186,15 @@ def load_ensemble_state(path: Path | None = None) -> EnsembleState:
 
 
 def save_ensemble_state(state: EnsembleState, path: Path | None = None) -> Path:
-    """Persist to JSON. Creates the parent directory if missing."""
+    """Persist to JSON atomically. Creates the parent directory if missing.
+
+    Uses tempfile+rename so a kill-mid-write can't corrupt the file —
+    important because the daily-trade routine clobbers state on every
+    run and a corrupted state file would break the next run's load.
+    """
+    from quant.agent.log import _atomic_write_text  # local: avoid cycle
     p = path or DEFAULT_STATE_PATH
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(asdict(state), indent=2))
+    _atomic_write_text(p, json.dumps(asdict(state), indent=2))
     return p
 
 

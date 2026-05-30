@@ -202,6 +202,7 @@ def test_real_submit_calls_alpaca_per_order() -> None:
         target_weights={"AAPL": 0.4, "MSFT": 0.4},
         signal_prices={"AAPL": 200.0, "MSFT": 400.0},
         dry_run=False,
+        i_understand_no_stops=True,
     )
     assert len(client.submitted) == 2
     assert all(o.status == "submitted" for o in report.submitted_orders)
@@ -220,6 +221,7 @@ def test_broker_rejection_recorded_as_failed_not_raised() -> None:
         target_weights={"AAPL": 0.5},
         signal_prices={"AAPL": 200.0},
         dry_run=False,
+        i_understand_no_stops=True,
     )
     assert len(report.submitted_orders) == 1
     assert report.submitted_orders[0].status == "failed"
@@ -252,6 +254,37 @@ def test_report_includes_snapshot_of_inputs() -> None:
 # ---------------------------------------------------------------------------
 # submit_daily_rebalance — the agent's flow
 # ---------------------------------------------------------------------------
+
+
+def test_submit_to_match_targets_refuses_live_without_explicit_optin() -> None:
+    """The bare-entry path bypasses the 5% stop rule; live calls without
+    the i_understand_no_stops opt-in must raise rather than silently
+    place naked orders."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    with pytest.raises(PermissionError, match="bypasses the 5% stop"):
+        exec_.submit_to_match_targets(
+            target_weights={"AAPL": 0.1},
+            signal_prices={"AAPL": 200.0},
+            dry_run=False,        # live submit
+            # i_understand_no_stops omitted on purpose
+        )
+    # No orders were submitted; the broker remained pristine.
+    assert client.submitted == []
+
+
+def test_submit_to_match_targets_dry_run_does_not_require_optin() -> None:
+    """Dry-run is read-only; safe to call without the opt-in flag."""
+    client = _FakeTradingClient(equity=100_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_to_match_targets(
+        target_weights={"AAPL": 0.1},
+        signal_prices={"AAPL": 200.0},
+        dry_run=True,
+    )
+    # No exception, no broker calls, but the report still computed.
+    assert client.submitted == []
+    assert len(report.submitted_orders) == 1
 
 
 def test_daily_rebalance_cancels_open_orders_first() -> None:

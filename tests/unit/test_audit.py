@@ -265,13 +265,48 @@ def test_recent_non_empty_err_log_fails(tmp_path: Path) -> None:
 def test_old_err_log_ignored(tmp_path: Path) -> None:
     """An old error log (outside the window) should NOT trigger a failure."""
     fp = tmp_path / "ancient.err"
-    fp.write_text("very old error\n")
+    fp.write_text("Traceback: very old error\n")   # has marker
     # Set mtime to 48h ago.
     import os
     old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=48)).timestamp()
     os.utime(fp, (old_ts, old_ts))
     check = _check_recent_error_logs(log_dir=tmp_path, hours=26)
     assert check.passed, check.message
+
+
+def test_warning_only_err_log_does_not_flag(tmp_path: Path) -> None:
+    """A .err containing only WARNING lines (e.g. successful retries
+    that ended up succeeding) must NOT be flagged — that was the
+    false-positive that caused every flaky-but-OK run to fail the audit.
+    """
+    fp = tmp_path / "daily-trade.err"
+    fp.write_text(
+        "2026-05-30 21:35:11,000 WARNING quant.util.retry: Alpaca bars fetch "
+        "(1 symbols): transient error on attempt 1/4 (ConnectionError); "
+        "retrying in 1.0s\n"
+        "2026-05-30 21:35:14,000 WARNING quant.util.retry: Alpaca bars fetch "
+        "(1 symbols): transient error on attempt 2/4 (ConnectionError); "
+        "retrying in 3.0s\n"
+    )
+    check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+    assert check.passed, (
+        f"WARNING-only log should not trip the audit (msg: {check.message})"
+    )
+
+
+def test_err_log_with_real_error_still_flags(tmp_path: Path) -> None:
+    """A real Python traceback or ERROR-level log must flag.
+    Belt-and-suspenders test for the marker-based detection."""
+    for marker_line, fname in [
+        ("ERROR something went wrong", "a.err"),
+        ("Traceback (most recent call last):", "b.err"),
+    ]:
+        fp = tmp_path / fname
+        fp.write_text(marker_line + "\n")
+        check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+        assert not check.passed, (
+            f"Log containing '{marker_line}' should have flagged"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
+import sys
 from datetime import date, timedelta
 from pathlib import Path
-
-import math
 
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
@@ -36,7 +36,6 @@ from quant.agent.ensemble import (
 )
 from quant.agent.log import (
     DEFAULT_RUNS_DIR,
-    DEFAULT_WEEKLY_DIR,
     load_daily_run,
     load_recent_weekly_reports,
     save_weekly_report,
@@ -261,7 +260,7 @@ def run_weekly_review(
     metrics: dict = {}
     if enable_ai_analyst and daily_runs:
         try:
-            from quant.agent.ai_analyst import AIAnalyst   # lazy: optional dep
+            from quant.agent.ai_analyst import AIAnalyst  # lazy: optional dep
             metrics = _compute_weekly_metrics(daily_runs, equity_curve)
             # Self-improvement: feed the past N weeks' narratives so this
             # week's analysis can reference continuity, self-critique, and
@@ -338,6 +337,7 @@ def cli_run() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     parser = argparse.ArgumentParser(description="Send the agent's weekly review.")
     parser.add_argument("--for-date", default=None, help="ISO date; defaults to today")
