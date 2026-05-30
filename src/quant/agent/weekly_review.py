@@ -34,7 +34,13 @@ from quant.agent.ensemble import (
     refit_hrp_weights,
     save_ensemble_state,
 )
-from quant.agent.log import DEFAULT_RUNS_DIR, load_daily_run
+from quant.agent.log import (
+    DEFAULT_RUNS_DIR,
+    DEFAULT_WEEKLY_DIR,
+    load_daily_run,
+    load_recent_weekly_reports,
+    save_weekly_report,
+)
 from quant.agent.reports import render_weekly_report
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
@@ -151,6 +157,8 @@ def run_weekly_review(
     state_path: Path | None = None,
     refit_hrp: bool = True,
     enable_ai_analyst: bool = True,
+    weekly_dir: Path | None = None,
+    n_past_reports: int = 4,
     # Test-injection points:
     cache: BarsCache | None = None,
     universe: list[str] | None = None,
@@ -250,17 +258,39 @@ def run_weekly_review(
     # claims; pass the HRP diagnostic so it can reason about weight shifts.
     # Disabled in tests via enable_ai_analyst=False to avoid hitting the API.
     deep_dive_md = ""
+    metrics: dict = {}
     if enable_ai_analyst and daily_runs:
         try:
             from quant.agent.ai_analyst import AIAnalyst   # lazy: optional dep
             metrics = _compute_weekly_metrics(daily_runs, equity_curve)
+            # Self-improvement: feed the past N weeks' narratives so this
+            # week's analysis can reference continuity, self-critique, and
+            # escalate persistent issues (per WEEKLY_ANALYST.md §5).
+            past_reports = load_recent_weekly_reports(
+                before=for_date, n=n_past_reports, weekly_dir=weekly_dir,
+            )
+            logger.info(
+                "weekly_review: loaded %d past weekly reports for self-improvement",
+                len(past_reports),
+            )
             analyst = AIAnalyst()
             weekly_report = analyst.analyze_weekly(
                 daily_runs=daily_runs,
                 weekly_metrics=metrics,
                 hrp_diagnostic=hrp_diag,
+                past_weekly_reports=past_reports,
             )
             deep_dive_md = weekly_report.narrative
+            # Persist THIS week's narrative so next week (and the monthly
+            # review) can read it.
+            saved_path = save_weekly_report(
+                week_ending=for_date,
+                narrative=deep_dive_md,
+                metrics=metrics,
+                hrp_diagnostic=hrp_diag,
+                weekly_dir=weekly_dir,
+            )
+            logger.info("weekly_review: saved deep-dive to %s", saved_path)
         except Exception as e:
             # AI failure must NOT prevent the rest of the report from sending.
             # Surface it inline so the operator notices.

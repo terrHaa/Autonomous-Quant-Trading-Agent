@@ -45,7 +45,11 @@ from quant.agent.improver import (
     ImprovementResult,
     search_improvements,
 )
-from quant.agent.log import DEFAULT_RUNS_DIR, load_daily_run
+from quant.agent.log import (
+    DEFAULT_RUNS_DIR,
+    load_daily_run,
+    load_recent_weekly_reports,
+)
 from quant.agent.params import StrategyParams
 from quant.agent.reports import render_monthly_report
 from quant.agent.strategy_sandbox import (
@@ -221,12 +225,25 @@ def run_monthly_review(
     recommendations.append("\n---\n")
     ai_report: AnalysisReport | None = None
     try:
+        # Load the past ~4 weekly reports so the monthly analyst builds
+        # on the weekly analyst's curated observations (esp. items the
+        # weekly side flagged as "WORTH ESCALATING TO MONTHLY REVIEW").
+        # Empty list when no weekly reports exist yet — analyst handles
+        # that case explicitly per ANALYST.md §6 step 5a.
+        recent_weeklies = load_recent_weekly_reports(before=for_date, n=4)
+        if recent_weeklies:
+            recommendations.append(
+                f"_Loaded {len(recent_weeklies)} prior weekly report(s) into "
+                "analyst context (week endings: "
+                f"{', '.join(r.get('week_ending', '?') for r in recent_weeklies)})._\n"
+            )
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
             current_state=asdict(current_state),
             ai_strategy_names=list(current_state.ai_strategy_names),
             grid_search_summary=grid_search_summary,
+            recent_weekly_reports=recent_weeklies,
         )
         # Always include the qualitative analysis in the email.
         recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")

@@ -272,3 +272,118 @@ def test_analyze_weekly_strips_markdown_fences() -> None:
     )
     assert report.narrative.startswith("## Headline")
     assert "```" not in report.narrative
+
+
+# ---------------------------------------------------------------------------
+# Cross-week / cross-month context — the self-improvement plumbing
+# ---------------------------------------------------------------------------
+
+
+class _CapturingClient:
+    """Fake Anthropic client that captures the user message for inspection."""
+    def __init__(self, raw_response: str = "ok"):
+        self.last_user_msg: str | None = None
+        self._raw = raw_response
+
+    class messages:
+        pass
+
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+
+    def _make_messages(self):
+        outer = self
+        class _M:
+            @staticmethod
+            def create(*, system, messages, **kw):
+                outer.last_user_msg = messages[0]["content"]
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text=outer._raw)]
+                )
+        return _M
+
+    def __init__(self, raw_response: str = "ok"):
+        self.last_user_msg = None
+        self._raw = raw_response
+        self.messages = self._make_messages()
+
+
+def _analyst_with_capturing_client(raw: str = "ok") -> tuple[AIAnalyst, _CapturingClient]:
+    a = object.__new__(AIAnalyst)
+    a._model = "test-model"
+    fake = _CapturingClient(raw)
+    a._client = fake
+    return a, fake
+
+
+def test_analyze_weekly_includes_past_reports_in_user_message() -> None:
+    """When past_weekly_reports is passed, the analyst sees them in the prompt."""
+    analyst, client = _analyst_with_capturing_client("## ok\n\nbody")
+    past = [
+        {"week_ending": "2026-05-15", "narrative": "## Headline\n\nNVDA flagged elevated trail."},
+        {"week_ending": "2026-05-22", "narrative": "## Headline\n\nNVDA stopped out at $X."},
+    ]
+    analyst.analyze_weekly(
+        daily_runs=[], weekly_metrics={}, hrp_diagnostic={},
+        past_weekly_reports=past,
+    )
+    msg = client.last_user_msg
+    assert msg is not None
+    # Both past report dates appear in the user message
+    assert "2026-05-15" in msg
+    assert "2026-05-22" in msg
+    # Both narratives are embedded verbatim
+    assert "NVDA flagged elevated trail" in msg
+    assert "NVDA stopped out" in msg
+    # Oldest first ordering (5-15 before 5-22)
+    assert msg.index("2026-05-15") < msg.index("2026-05-22")
+
+
+def test_analyze_weekly_handles_no_past_reports_explicitly() -> None:
+    """First-call case: no past reports → user message says so plainly so
+    the analyst doesn't pretend it has history it doesn't have."""
+    analyst, client = _analyst_with_capturing_client("ok")
+    analyst.analyze_weekly(
+        daily_runs=[], weekly_metrics={}, hrp_diagnostic={},
+        past_weekly_reports=None,
+    )
+    msg = client.last_user_msg
+    assert "No past weekly reports" in msg
+
+
+def test_analyze_monthly_includes_weekly_reports_in_user_message() -> None:
+    """The monthly analyst's user message embeds the weekly narratives."""
+    analyst, client = _analyst_with_capturing_client(
+        '{"analysis": "x", "proposed_strategy": null}'
+    )
+    weekly = [
+        {"week_ending": "2026-05-22", "narrative": "Watch items: tighten trail. WORTH ESCALATING TO MONTHLY REVIEW."},
+        {"week_ending": "2026-05-29", "narrative": "Watch items: same as last week. WORTH ESCALATING TO MONTHLY REVIEW."},
+    ]
+    analyst.analyze(
+        daily_runs=[], current_state={"hrp_weights": {}},
+        recent_weekly_reports=weekly,
+    )
+    msg = client.last_user_msg
+    assert msg is not None
+    assert "2026-05-22" in msg
+    assert "2026-05-29" in msg
+    # The escalation marker survives — that's the key cross-system signal
+    assert "WORTH ESCALATING TO MONTHLY REVIEW" in msg
+    # And the user message prompts the analyst to address the escalation
+    assert "WORTH ESCALATING TO MONTHLY REVIEW" in msg
+
+
+def test_weekly_analyst_md_documents_self_improvement_loop() -> None:
+    """The constitution must explicitly tell the analyst to use past reports."""
+    prompt = _build_weekly_system_prompt()
+    assert "Self-improvement" in prompt
+    assert "WORTH ESCALATING TO MONTHLY REVIEW" in prompt
+
+
+def test_analyst_md_documents_weekly_cross_reference() -> None:
+    """The monthly analyst's constitution must explicitly direct it to
+    read the weekly reports (workflow step 5a)."""
+    prompt = _build_system_prompt()
+    assert "Recent weekly reports" in prompt
+    assert "WORTH ESCALATING TO MONTHLY REVIEW" in prompt

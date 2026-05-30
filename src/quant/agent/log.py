@@ -39,6 +39,7 @@ from quant.execution.alpaca_executor import ExecutionReport
 # log.py at src/quant/agent/log.py → 4 parents up = repo root.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DEFAULT_RUNS_DIR = _PROJECT_ROOT / "data" / "agent" / "runs"
+DEFAULT_WEEKLY_DIR = _PROJECT_ROOT / "data" / "agent" / "weekly_reports"
 
 
 def save_daily_run(
@@ -105,6 +106,69 @@ def list_recent_runs(
             continue
     dates.sort(reverse=True)
     return dates[:limit] if limit else dates
+
+
+# ---------------------------------------------------------------------------
+# Weekly report persistence — feeds self-improvement (weekly N+1 reads
+# past N weekly reports) and the monthly analyst's comprehensive analysis.
+# ---------------------------------------------------------------------------
+
+
+def save_weekly_report(
+    *,
+    week_ending: date,
+    narrative: str,
+    metrics: dict[str, Any],
+    hrp_diagnostic: dict[str, Any] | None = None,
+    weekly_dir: Path | None = None,
+) -> Path:
+    """Persist one week's AI deep-dive to JSON. Returns the file path.
+
+    Stored at ``data/agent/weekly_reports/YYYY-MM-DD.json`` keyed by the
+    Friday ending the week. Subsequent weekly + monthly reviews load these
+    so the analyst has its own history to refer to.
+    """
+    out_dir = weekly_dir or DEFAULT_WEEKLY_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{week_ending.isoformat()}.json"
+    payload = {
+        "week_ending": week_ending.isoformat(),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "narrative": narrative,
+        "metrics": metrics,
+        "hrp_diagnostic": hrp_diagnostic or {},
+    }
+    out_path.write_text(json.dumps(payload, default=str, indent=2))
+    return out_path
+
+
+def load_recent_weekly_reports(
+    *,
+    before: date | None = None,
+    n: int = 4,
+    weekly_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Load up to N most-recent weekly reports STRICTLY BEFORE ``before``.
+
+    Ordering: oldest → newest, so the analyst reads them in chronological
+    order (matching how a human would catch up on history). Empty list
+    when no reports exist (fresh install).
+    """
+    out_dir = weekly_dir or DEFAULT_WEEKLY_DIR
+    if not out_dir.exists():
+        return []
+    cutoff = before or date.today()
+    dated: list[tuple[date, Path]] = []
+    for p in out_dir.glob("*.json"):
+        try:
+            d = date.fromisoformat(p.stem)
+        except ValueError:
+            continue
+        if d < cutoff:
+            dated.append((d, p))
+    dated.sort(key=lambda kv: kv[0])  # oldest → newest
+    selected = dated[-n:] if n > 0 else []
+    return [json.loads(p.read_text()) for _, p in selected]
 
 
 # ---------------------------------------------------------------------------

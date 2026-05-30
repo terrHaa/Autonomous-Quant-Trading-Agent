@@ -211,6 +211,21 @@ work in the `analysis` field:
    - For trail_pct decisions specifically: look for give-back patterns
      and whipsaw evidence in the trail_high snapshots across daily runs.
 
+5a. **Read the recent weekly reports** (loaded into your prompt under
+    "Recent weekly reports"). These are your OWN past observations
+    written each Saturday by the weekly analyst (which is also you, in
+    a narrower role). They give you:
+    - Curated attribution per week (which strategies/names drove returns)
+    - Cumulative regime characterisation across the month
+    - Items the weekly analyst flagged as
+      **"WORTH ESCALATING TO MONTHLY REVIEW"** — these are PRIMARY input
+      to your proposals. If a weekly
+      observation has been flagged repeatedly, that's strong evidence
+      a structural change is warranted (parameter, strategy, or trail_pct).
+    Do not duplicate the weekly's attribution work — build on it. Your
+    job is to find what the weekly missed because it lacked the
+    monthly's wider context (multiple months, MEMORY.md, EDGE_TAXONOMY).
+
 6. **Formulate the edge thesis.** ONE sentence: "I believe there is alpha
    in X because Y, and the existing strategies miss it because Z."
 

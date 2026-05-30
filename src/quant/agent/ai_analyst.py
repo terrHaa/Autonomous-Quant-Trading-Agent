@@ -239,6 +239,7 @@ def _build_user_message(
     current_state: dict[str, Any],
     grid_search_summary: str,
     ai_strategy_names: list[str],
+    recent_weekly_reports: list[dict[str, Any]] | None = None,
 ) -> str:
     """Compose the full user-turn message for the analyst call."""
     runs_table = _summarise_runs(daily_runs)
@@ -246,13 +247,43 @@ def _build_user_message(
     active_ai = (
         ", ".join(ai_strategy_names) if ai_strategy_names else "none yet"
     )
+
+    # Recent weekly narratives — oldest first — give the monthly analyst
+    # the weekly analyst's curated observations. Per ANALYST.md §6 step
+    # 5a, the monthly analyst BUILDS ON these rather than re-deriving
+    # attribution from raw daily data. Watch for "WORTH ESCALATING TO
+    # MONTHLY REVIEW" markers from the weekly side.
+    past_weekly = recent_weekly_reports or []
+    if past_weekly:
+        weekly_section_parts = [
+            "## Recent weekly reports — written by the WEEKLY analyst "
+            "(your narrower self), oldest first",
+            "",
+        ]
+        for r in past_weekly:
+            weekly_section_parts.append(
+                f"### Week ending {r.get('week_ending', '?')}\n\n"
+                f"{r.get('narrative', '(no narrative recorded)')}"
+            )
+        weekly_section = "\n\n".join(weekly_section_parts) + "\n\n"
+    else:
+        weekly_section = (
+            "## Recent weekly reports\n\n"
+            "_No weekly reports available yet (fresh install or first month). "
+            "Reason from raw daily data this time; future months will have "
+            "weekly observations to build on._\n\n"
+        )
+
     return (
         f"## Trading Results — last {len(daily_runs)} trading day(s)\n\n"
         f"{runs_table}\n\n"
         f"## Current EnsembleState\n\n```json\n{state_json}\n```\n\n"
         f"## AI-Generated Strategies Already Active\n\n{active_ai}\n\n"
         f"## Monthly Grid-Search Results\n\n{grid_search_summary}\n\n"
-        "---\nPlease analyze the results and propose a new strategy if appropriate."
+        f"{weekly_section}"
+        "---\nPlease analyze the results and propose a new strategy if appropriate. "
+        "If weekly reports flagged anything 'WORTH ESCALATING TO MONTHLY REVIEW', "
+        "address those explicitly in your analysis and proposal decisions."
     )
 
 
@@ -313,6 +344,7 @@ class AIAnalyst:
         current_state: dict[str, Any],
         ai_strategy_names: list[str] | None = None,
         grid_search_summary: str = "Grid search was not run this month.",
+        recent_weekly_reports: list[dict[str, Any]] | None = None,
     ) -> AnalysisReport:
         """Call Claude to analyze results and optionally propose a new strategy.
 
@@ -327,6 +359,12 @@ class AIAnalyst:
             proposing duplicates).
         grid_search_summary
             Human-readable string from the monthly grid search step.
+        recent_weekly_reports
+            Past ~4 weekly narratives (oldest first) so the monthly analyst
+            BUILDS ON the weekly analyst's curated observations instead of
+            re-deriving attribution from raw daily data. Each is a dict
+            with at least ``week_ending`` and ``narrative`` keys. Watch for
+            "WORTH ESCALATING TO MONTHLY REVIEW" markers from the weekly side.
 
         Returns
         -------
@@ -339,6 +377,7 @@ class AIAnalyst:
             current_state,
             grid_search_summary,
             ai_strategy_names or [],
+            recent_weekly_reports=recent_weekly_reports,
         )
         logger.info(
             "ai_analyst: calling %s with %d daily runs", self._model, len(daily_runs)
@@ -407,6 +446,7 @@ class AIAnalyst:
         daily_runs: list[dict[str, Any]],
         weekly_metrics: dict[str, Any],
         hrp_diagnostic: dict[str, Any] | None = None,
+        past_weekly_reports: list[dict[str, Any]] | None = None,
     ) -> WeeklyAnalysisReport:
         """Call Claude to write a deep-dive analysis of the past week.
 
@@ -431,13 +471,40 @@ class AIAnalyst:
         metrics_json = json.dumps(weekly_metrics, indent=2, default=str)
         hrp_json = json.dumps(hrp_diagnostic or {}, indent=2, default=str)
 
+        # Past weekly reports — oldest first — for self-improvement per
+        # WEEKLY_ANALYST.md §5. Each entry is a dict with at least
+        # "week_ending" and "narrative" keys. Empty list = fresh install.
+        past_reports = past_weekly_reports or []
+        if past_reports:
+            past_section_parts = [
+                "## Recent weekly reports — your own past narratives "
+                "(oldest first) — see WEEKLY_ANALYST.md §5",
+                "",
+            ]
+            for r in past_reports:
+                past_section_parts.append(
+                    f"### Week ending {r.get('week_ending', '?')}\n\n"
+                    f"{r.get('narrative', '(no narrative recorded)')}"
+                )
+            past_section = "\n\n".join(past_section_parts) + "\n\n"
+        else:
+            past_section = (
+                "## Recent weekly reports\n\n"
+                "_No past weekly reports yet — this is one of your first calls. "
+                "Establish the baseline; future weeks will reference back to "
+                "what you observe here._\n\n"
+            )
+
         user_msg = (
             f"## Past week's daily runs\n\n{runs_table}\n\n"
             f"## Pre-computed weekly metrics\n\n```json\n{metrics_json}\n```\n\n"
             f"## HRP refit diagnostic (this Saturday's refit)\n\n```json\n{hrp_json}\n```\n\n"
+            f"{past_section}"
             "---\n\nWrite the weekly performance deep-dive per "
             "WEEKLY_ANALYST.md §2. Markdown only, no JSON, no fences. "
-            "Begin with the headline paragraph; end with the watch items."
+            "Begin with the headline paragraph; end with the watch items. "
+            "If past reports exist, apply WEEKLY_ANALYST.md §5 — note "
+            "continuity, self-critique, escalations."
         )
         logger.info(
             "ai_analyst: weekly call with %d daily runs", len(daily_runs)
