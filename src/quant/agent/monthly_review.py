@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -69,6 +70,181 @@ logger = logging.getLogger(__name__)
 # for ~500 trading days of returns — enough to estimate Sharpe with some
 # stability, not so much that ancient regimes dominate.
 IMPROVER_BACKTEST_YEARS = 2
+
+
+def _compute_monthly_metrics(
+    daily_runs: list[dict],
+    equity_curve: dict[date, float],
+) -> dict:
+    """30-day statistical view for the monthly analyst.
+
+    Different from _compute_weekly_metrics in scope and intent:
+      - Weekly metrics are about THIS week (headline + attribution)
+      - Monthly metrics are about LONGER trends and patterns that a
+        4-week-window of weekly summaries would miss:
+          • Lag-1 autocorrelation of returns (trend vs MR regime)
+          • Day-of-week breakdown (catches calendar effects)
+          • Position persistence (book stability)
+          • HRP weight drift over the full month
+          • Streak analysis (psychology + tail risk)
+          • Top-10 movers (vs top-5 in weekly — broader attribution)
+          • Raw daily-return series (analyst can run its own stats)
+    The monthly analyst is directed (ANALYST.md §6 step 5b) to combine
+    these statistical metrics with the weekly narratives and the raw
+    daily-runs table for triangulated analysis.
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        return {"insufficient_data": True, "n_days": len(equity_curve)}
+
+    days = sorted(equity_curve)
+    equities = [equity_curve[d] for d in days]
+    n = len(equities)
+
+    # Daily returns
+    daily_returns: list[float] = []
+    return_dates: list[date] = []
+    for i in range(1, n):
+        prev = equities[i - 1]
+        if prev > 0:
+            daily_returns.append(equities[i] / prev - 1.0)
+            return_dates.append(days[i])
+
+    total_return = (equities[-1] / equities[0] - 1.0) if equities[0] > 0 else 0.0
+
+    if len(daily_returns) > 1:
+        mean_r = sum(daily_returns) / len(daily_returns)
+        var = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+        std = math.sqrt(var)
+        ann_sharpe = (mean_r / std) * math.sqrt(252) if std > 0 else 0.0
+        ann_vol = std * math.sqrt(252)
+    else:
+        ann_sharpe = 0.0
+        ann_vol = 0.0
+
+    # Max intra-month drawdown
+    peak = equities[0]
+    max_dd = 0.0
+    for e in equities:
+        peak = max(peak, e)
+        if peak > 0:
+            max_dd = min(max_dd, (e - peak) / peak)
+
+    # Day-of-week breakdown: Mon=0..Fri=4. Mean return + win rate per dow.
+    dow_buckets: dict[int, list[float]] = {k: [] for k in range(5)}
+    for d, r in zip(return_dates, daily_returns):
+        if d.weekday() < 5:   # exclude weekends defensively (shouldn't occur)
+            dow_buckets[d.weekday()].append(r)
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    dow_summary: dict[str, dict] = {}
+    for k, rs in dow_buckets.items():
+        if rs:
+            mean = sum(rs) / len(rs)
+            wins = sum(1 for r in rs if r > 0)
+            dow_summary[dow_names[k]] = {
+                "n": len(rs),
+                "mean_return_pct": round(mean * 100, 3),
+                "win_rate_pct": round(wins / len(rs) * 100, 1),
+            }
+
+    # Lag-1 autocorrelation — positive = trending/momentum regime,
+    # negative = mean-reverting regime, ~0 = noise.
+    if len(daily_returns) >= 3:
+        r_prev = daily_returns[:-1]
+        r_next = daily_returns[1:]
+        m_prev = sum(r_prev) / len(r_prev)
+        m_next = sum(r_next) / len(r_next)
+        cov = sum((a - m_prev) * (b - m_next) for a, b in zip(r_prev, r_next)) / (len(r_prev) - 1)
+        s_prev = math.sqrt(sum((a - m_prev) ** 2 for a in r_prev) / (len(r_prev) - 1))
+        s_next = math.sqrt(sum((b - m_next) ** 2 for b in r_next) / (len(r_next) - 1))
+        autocorr1 = cov / (s_prev * s_next) if s_prev > 0 and s_next > 0 else 0.0
+    else:
+        autocorr1 = 0.0
+
+    # Position persistence — what fraction of yesterday's target names
+    # survive into today's targets? High = stable book; low = high churn.
+    sorted_runs = sorted(daily_runs, key=lambda r: r.get("date", ""))
+    persistence_rates: list[float] = []
+    for i in range(1, len(sorted_runs)):
+        prev_tgts = set(sorted_runs[i - 1].get("target_weights", {}).keys())
+        curr_tgts = set(sorted_runs[i].get("target_weights", {}).keys())
+        if prev_tgts:
+            persistence_rates.append(len(prev_tgts & curr_tgts) / len(prev_tgts))
+    avg_persistence = (
+        sum(persistence_rates) / len(persistence_rates) if persistence_rates else 0.0
+    )
+
+    # HRP weight drift over the month
+    hrp_drift: dict[str, float] = {}
+    if len(sorted_runs) >= 2:
+        first_hrp = (
+            sorted_runs[0]
+            .get("strategy_params", {})
+            .get("ensemble_state", {})
+            .get("hrp_weights", {})
+        )
+        last_hrp = (
+            sorted_runs[-1]
+            .get("strategy_params", {})
+            .get("ensemble_state", {})
+            .get("hrp_weights", {})
+        )
+        for k in set(first_hrp) | set(last_hrp):
+            drift = last_hrp.get(k, 0.0) - first_hrp.get(k, 0.0)
+            hrp_drift[k] = round(drift, 4)
+
+    # Streak analysis — longest positive and negative runs of consecutive
+    # daily returns. Useful for psychology + tail risk reasoning.
+    longest_win = longest_loss = 0
+    cur_run = cur_sign = 0
+    for r in daily_returns:
+        sign = 1 if r > 0 else (-1 if r < 0 else 0)
+        if sign == cur_sign and sign != 0:
+            cur_run += 1
+        else:
+            cur_sign = sign
+            cur_run = 1 if sign != 0 else 0
+        if sign > 0:
+            longest_win = max(longest_win, cur_run)
+        elif sign < 0:
+            longest_loss = max(longest_loss, cur_run)
+
+    # Top-10 gainers / losers over the FULL month by signal-price move.
+    if sorted_runs:
+        first_prices = sorted_runs[0].get("signal_prices", {})
+        last_prices = sorted_runs[-1].get("signal_prices", {})
+        moves: list[tuple[str, float]] = []
+        for sym, p0 in first_prices.items():
+            if sym in last_prices and p0 > 0:
+                moves.append((sym, last_prices[sym] / p0 - 1.0))
+        moves.sort(key=lambda x: x[1])
+        top10_losers = [{"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[:10]]
+        top10_gainers = [
+            {"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[-10:][::-1]
+        ]
+    else:
+        top10_gainers = top10_losers = []
+
+    return {
+        "n_days": n,
+        "n_daily_returns": len(daily_returns),
+        "equity_start": round(equities[0], 2),
+        "equity_end": round(equities[-1], 2),
+        "total_return_pct": round(total_return * 100, 4),
+        "ann_sharpe": round(ann_sharpe, 3),
+        "ann_realized_vol_pct": round(ann_vol * 100, 2),
+        "max_drawdown_pct": round(max_dd * 100, 4),
+        "longest_winning_streak_days": longest_win,
+        "longest_losing_streak_days": longest_loss,
+        "lag1_autocorrelation": round(autocorr1, 3),
+        "avg_position_persistence_pct": round(avg_persistence * 100, 1),
+        "hrp_weight_drift_over_month": hrp_drift,
+        "day_of_week_breakdown": dow_summary,
+        "top10_gainers_month": top10_gainers,
+        "top10_losers_month": top10_losers,
+        # Raw daily-return series — empowers the analyst to compute its
+        # own statistics (e.g., rolling Sharpe, regime breaks).
+        "daily_returns_pct": [round(r * 100, 3) for r in daily_returns],
+    }
 
 
 def run_monthly_review(
@@ -237,6 +413,13 @@ def run_monthly_review(
                 "analyst context (week endings: "
                 f"{', '.join(r.get('week_ending', '?') for r in recent_weeklies)})._\n"
             )
+        # Pre-compute monthly statistical metrics. Different signal from
+        # weekly digests — these are 30-day patterns (autocorrelation,
+        # day-of-week effects, position persistence, HRP weight drift,
+        # streak runs) that 4 weekly summaries condensed into narratives
+        # would obscure. The analyst is told to triangulate THREE sources:
+        # weekly narratives + raw daily table + these metrics.
+        monthly_metrics = _compute_monthly_metrics(daily_runs, equity_curve)
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
@@ -244,6 +427,7 @@ def run_monthly_review(
             ai_strategy_names=list(current_state.ai_strategy_names),
             grid_search_summary=grid_search_summary,
             recent_weekly_reports=recent_weeklies,
+            monthly_metrics=monthly_metrics,
         )
         # Always include the qualitative analysis in the email.
         recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")

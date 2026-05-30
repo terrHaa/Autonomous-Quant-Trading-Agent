@@ -207,17 +207,20 @@ class WeeklyAnalysisReport:
 def _summarise_runs(daily_runs: list[dict[str, Any]]) -> str:
     """Condense daily run records into a compact table for the prompt.
 
-    Keeps token count low while giving the model enough signal to reason
-    about trends (equity, position count, top names per day).
+    Adds a Daily-Return column (equity[t] vs equity[t-1]) so the analyst
+    can spot streaks, regime shifts, and bad/good days at a glance
+    without having to compute the deltas in its head.
     """
     if not daily_runs:
         return "No daily runs available for the review period."
 
+    sorted_runs = sorted(daily_runs, key=lambda r: r.get("date", ""))
     lines = [
-        "Date       | Equity ($)  | Entries | Stops | Top-3 positions",
-        "-----------|-------------|---------|-------|----------------",
+        "Date       | Equity ($)  | Daily Δ% | Entries | Stops | Top-3 positions",
+        "-----------|-------------|----------|---------|-------|----------------",
     ]
-    for run in sorted(daily_runs, key=lambda r: r.get("date", "")):
+    prev_equity: float | None = None
+    for run in sorted_runs:
         d = run.get("date", "?")
         er = run.get("execution_report", {})
         equity = er.get("account_equity_before")
@@ -229,7 +232,19 @@ def _summarise_runs(daily_runs: list[dict[str, Any]]) -> str:
             sorted(targets, key=lambda s: -targets[s])[:3]
         ) if targets else "—"
         equity_str = f"{equity:>12,.0f}" if isinstance(equity, (int, float)) else f"{'?':>12}"
-        lines.append(f"{d} | {equity_str} | {entries:>7} | {stops:>5} | {top_names}")
+        # Daily return column — first row shows "—"; subsequent rows show
+        # signed pct vs prior equity. This is a holding-only proxy since
+        # equity is BEFORE today's trade, capturing yesterday's P&L.
+        if isinstance(equity, (int, float)) and prev_equity and prev_equity > 0:
+            ret_pct = (equity / prev_equity - 1.0) * 100
+            ret_str = f"{ret_pct:+7.2f}%"
+        else:
+            ret_str = "      —"
+        if isinstance(equity, (int, float)):
+            prev_equity = float(equity)
+        lines.append(
+            f"{d} | {equity_str} | {ret_str} | {entries:>7} | {stops:>5} | {top_names}"
+        )
 
     return "\n".join(lines)
 
@@ -240,6 +255,7 @@ def _build_user_message(
     grid_search_summary: str,
     ai_strategy_names: list[str],
     recent_weekly_reports: list[dict[str, Any]] | None = None,
+    monthly_metrics: dict[str, Any] | None = None,
 ) -> str:
     """Compose the full user-turn message for the analyst call."""
     runs_table = _summarise_runs(daily_runs)
@@ -274,16 +290,42 @@ def _build_user_message(
             "weekly observations to build on._\n\n"
         )
 
+    # Monthly statistical view — pre-computed metrics over the full
+    # 30-day window that the weekly summaries don't surface (lag-1
+    # autocorrelation, day-of-week effects, position persistence, HRP
+    # weight drift, streak runs, top-10 movers, raw daily-return series).
+    # The analyst is directed (ANALYST.md §6 step 5b) to TRIANGULATE
+    # these statistical patterns against the weekly narratives and the
+    # raw daily-runs table.
+    if monthly_metrics:
+        metrics_section = (
+            "## Monthly Statistical View — pre-computed over the full window "
+            "(see ANALYST.md §6 step 5b: triangulate with weekly narratives + "
+            "raw daily table)\n\n"
+            f"```json\n{json.dumps(monthly_metrics, indent=2, default=str)}\n```\n\n"
+        )
+    else:
+        metrics_section = ""
+
     return (
-        f"## Trading Results — last {len(daily_runs)} trading day(s)\n\n"
+        f"## Trading Results — last {len(daily_runs)} trading day(s) "
+        "(daily-grain table; spot-check specific days here)\n\n"
         f"{runs_table}\n\n"
+        f"{metrics_section}"
         f"## Current EnsembleState\n\n```json\n{state_json}\n```\n\n"
         f"## AI-Generated Strategies Already Active\n\n{active_ai}\n\n"
         f"## Monthly Grid-Search Results\n\n{grid_search_summary}\n\n"
         f"{weekly_section}"
         "---\nPlease analyze the results and propose a new strategy if appropriate. "
-        "If weekly reports flagged anything 'WORTH ESCALATING TO MONTHLY REVIEW', "
-        "address those explicitly in your analysis and proposal decisions."
+        "TRIANGULATE three sources before any proposal: (1) weekly narratives — "
+        "curated attribution, (2) raw daily table — granular events, "
+        "(3) monthly statistical view — longer-horizon patterns. "
+        "If they DISAGREE (e.g., weekly attribution credits NVDA but the "
+        "monthly day-of-week breakdown shows Monday underperformance is the "
+        "real story), explicitly note the disagreement — that's a high-signal "
+        "finding. If weekly reports flagged anything 'WORTH ESCALATING TO "
+        "MONTHLY REVIEW', address those explicitly in your analysis and "
+        "proposal decisions."
     )
 
 
@@ -345,6 +387,7 @@ class AIAnalyst:
         ai_strategy_names: list[str] | None = None,
         grid_search_summary: str = "Grid search was not run this month.",
         recent_weekly_reports: list[dict[str, Any]] | None = None,
+        monthly_metrics: dict[str, Any] | None = None,
     ) -> AnalysisReport:
         """Call Claude to analyze results and optionally propose a new strategy.
 
@@ -378,6 +421,7 @@ class AIAnalyst:
             grid_search_summary,
             ai_strategy_names or [],
             recent_weekly_reports=recent_weekly_reports,
+            monthly_metrics=monthly_metrics,
         )
         logger.info(
             "ai_analyst: calling %s with %d daily runs", self._model, len(daily_runs)

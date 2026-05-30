@@ -387,3 +387,65 @@ def test_analyst_md_documents_weekly_cross_reference() -> None:
     prompt = _build_system_prompt()
     assert "Recent weekly reports" in prompt
     assert "WORTH ESCALATING TO MONTHLY REVIEW" in prompt
+
+
+def test_analyst_md_documents_triangulation() -> None:
+    """ANALYST.md §6 step 5b must direct the monthly analyst to
+    triangulate weekly narratives + raw daily table + monthly stats."""
+    prompt = _build_system_prompt()
+    # Step 5b heading + the explicit instruction
+    assert "Triangulate" in prompt or "triangulate" in prompt
+    assert "Monthly Statistical View" in prompt
+    # The 3 data sources should all be named
+    assert "weekly narratives" in prompt.lower()
+    assert "daily" in prompt.lower()
+
+
+def test_analyze_monthly_includes_monthly_metrics_in_user_message() -> None:
+    """Monthly metrics get embedded as a JSON block in the user prompt."""
+    analyst, client = _analyst_with_capturing_client(
+        '{"analysis": "x", "proposed_strategy": null}'
+    )
+    metrics = {
+        "n_days": 30,
+        "ann_sharpe": 1.2,
+        "lag1_autocorrelation": 0.18,
+        "day_of_week_breakdown": {"Mon": {"mean_return_pct": -0.3, "n": 5}},
+        "longest_losing_streak_days": 3,
+    }
+    analyst.analyze(
+        daily_runs=[], current_state={"hrp_weights": {}},
+        monthly_metrics=metrics,
+    )
+    msg = client.last_user_msg
+    assert msg is not None
+    # Section header + content
+    assert "Monthly Statistical View" in msg
+    assert "lag1_autocorrelation" in msg
+    assert "0.18" in msg
+    # Triangulation directive should be present
+    assert "TRIANGULATE" in msg or "triangulate" in msg.lower()
+
+
+def test_analyze_monthly_without_metrics_omits_section() -> None:
+    """If monthly_metrics is None, the section is skipped — backwards-compat."""
+    analyst, client = _analyst_with_capturing_client(
+        '{"analysis": "x", "proposed_strategy": null}'
+    )
+    analyst.analyze(daily_runs=[], current_state={"hrp_weights": {}})
+    msg = client.last_user_msg
+    assert "Monthly Statistical View" not in msg
+
+
+def test_summarise_runs_includes_daily_delta_column() -> None:
+    """The daily-runs table now has a Daily Δ% column so the analyst can
+    spot streaks without computing deltas itself."""
+    from quant.agent.ai_analyst import _summarise_runs
+    runs = [
+        {"date": "2024-06-03", "execution_report": {"account_equity_before": 100_000.0, "submitted_orders": []}, "target_weights": {}},
+        {"date": "2024-06-04", "execution_report": {"account_equity_before": 101_000.0, "submitted_orders": []}, "target_weights": {}},
+    ]
+    table = _summarise_runs(runs)
+    assert "Daily Δ%" in table
+    # +1% should appear in row 2 (formatted)
+    assert "+1.00%" in table

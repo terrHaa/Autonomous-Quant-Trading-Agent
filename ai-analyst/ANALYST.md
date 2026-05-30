@@ -226,6 +226,30 @@ work in the `analysis` field:
     job is to find what the weekly missed because it lacked the
     monthly's wider context (multiple months, MEMORY.md, EDGE_TAXONOMY).
 
+5b. **Triangulate against the raw daily data + monthly statistical view.**
+    Weekly narratives are CONDENSED — they lose statistical granularity.
+    You also receive:
+    - The full **daily-runs table** (granular events per day, now with
+      a Daily Δ% column): spot-check claims from the weekly narratives.
+      Did the weekly's "strong Wednesday" actually show in the data?
+    - The **Monthly Statistical View** (a pre-computed JSON block):
+      30-day Sharpe, realized vol, max drawdown, **lag-1
+      autocorrelation** of daily returns (positive ≈ trending regime,
+      negative ≈ mean-reverting, ~0 ≈ noise), **day-of-week breakdown**
+      (catches calendar effects 4 weekly summaries would smear over),
+      **position persistence** (book-stability measure), **HRP weight
+      drift** across the month, **streak analysis**, **top-10
+      gainers/losers** (broader than weekly's top-5), and a **raw daily
+      returns series** so you can compute your own further statistics
+      (rolling Sharpe, regime breaks, etc.).
+
+    When the three sources DISAGREE, that's a high-signal finding.
+    Example: weekly narratives credit NVDA for the month, but the
+    monthly day-of-week breakdown shows Mondays were responsible for
+    most of the loss — that's a calendar effect, not a name story,
+    and it changes the prescription. Surface disagreements explicitly
+    in your `analysis` field.
+
 6. **Formulate the edge thesis.** ONE sentence: "I believe there is alpha
    in X because Y, and the existing strategies miss it because Z."
 
