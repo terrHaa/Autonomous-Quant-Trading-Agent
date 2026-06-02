@@ -36,6 +36,27 @@ T = TypeVar("T")
 _DEFAULT_BACKOFFS: tuple[float, ...] = (1.0, 3.0, 9.0)
 
 
+def _http_transient_exceptions() -> tuple[type[BaseException], ...]:
+    """The exception classes every HTTP caller (Alpaca data + trading +
+    audit's connectivity probe) should retry on. Lazy import so that
+    ``requests`` isn't a hard import-time dependency of util.retry.
+
+    SMTP transients are caller-specific (see EmailSender) — only HTTP
+    has enough call sites to justify a shared preset.
+    """
+    import requests.exceptions as _req_exc
+    return (
+        _req_exc.ConnectionError,
+        _req_exc.SSLError,
+        _req_exc.Timeout,
+    )
+
+
+# Module-level cached tuple — built on first import. Callers do
+# `transient=HTTP_TRANSIENT` instead of re-listing the three classes.
+HTTP_TRANSIENT: tuple[type[BaseException], ...] = _http_transient_exceptions()
+
+
 def retry_on_transient(
     fn: Callable[[], T],
     *,

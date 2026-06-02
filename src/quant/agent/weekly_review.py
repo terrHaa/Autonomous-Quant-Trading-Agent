@@ -21,15 +21,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import sys
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import (
-    EnsembleState,
     load_ensemble_state,
     refit_hrp_weights,
     save_ensemble_state,
@@ -45,6 +44,7 @@ from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top50_snapshot
+from quant.util.equity_stats import equity_series_stats, top_movers
 
 logger = logging.getLogger(__name__)
 
@@ -64,87 +64,33 @@ def _compute_weekly_metrics(
     Aims for SIGNAL not VOLUME — the metrics here are what a human PM would
     glance at first. Each value is also passed verbatim to the AI so it
     can quote magnitudes in the narrative.
+
+    Shared base math (Sharpe, max-DD, daily returns) lives in
+    ``util.equity_stats`` so the monthly review uses the same formulas;
+    weekly adds top-5 attribution + concentration on top.
     """
     if not equity_curve:
         return {"n_days": 0, "note": "no equity data this week"}
 
-    # Sort by date so daily returns line up.
-    days = sorted(equity_curve)
-    equities = [equity_curve[d] for d in days]
-    n = len(equities)
+    metrics = equity_series_stats(equity_curve)
 
-    # Daily returns are equity[t+1] / equity[t] - 1. Each day's recorded
-    # equity is BEFORE-trade for that day, so equity[d+1] - equity[d]
-    # captures day d's net P&L from holding + intraday trade.
-    daily_returns: list[float] = []
-    for i in range(1, n):
-        prev = equities[i - 1]
-        if prev > 0:
-            daily_returns.append(equities[i] / prev - 1.0)
-
-    total_return = (equities[-1] / equities[0] - 1.0) if equities[0] > 0 else 0.0
-
-    # Win rate: fraction of daily returns > 0
-    n_pos = sum(1 for r in daily_returns if r > 0)
-    n_neg = sum(1 for r in daily_returns if r < 0)
-    win_rate = n_pos / len(daily_returns) if daily_returns else 0.0
-
-    # Annualized Sharpe (252 trading days). For a short week the CI is
-    # huge — the analyst is told to acknowledge this.
-    if len(daily_returns) > 1:
-        mean = sum(daily_returns) / len(daily_returns)
-        var = sum((r - mean) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-        std = math.sqrt(var)
-        sharpe = (mean / std) * math.sqrt(252) if std > 0 else 0.0
-    else:
-        sharpe = 0.0
-
-    # Max drawdown intra-week (running peak − trough) / peak.
-    peak = equities[0]
-    max_dd = 0.0
-    for e in equities:
-        peak = max(peak, e)
-        dd = (e - peak) / peak if peak > 0 else 0.0
-        max_dd = min(max_dd, dd)
-
-    # Position-attribution: which symbols moved the most over the week?
-    # We diff each name's signal_price across the week (signal_price =
-    # prior close, so diff captures the week's price action on names we
-    # actually rebalanced into).
-    first_run = sorted(daily_runs, key=lambda r: r.get("date", ""))[0]
-    last_run = sorted(daily_runs, key=lambda r: r.get("date", ""))[-1]
-    first_prices = first_run.get("signal_prices", {})
-    last_prices = last_run.get("signal_prices", {})
-    moves: list[tuple[str, float]] = []
-    for sym, p0 in first_prices.items():
-        if sym in last_prices and p0 > 0:
-            move = last_prices[sym] / p0 - 1.0
-            moves.append((sym, move))
-    moves.sort(key=lambda x: x[1])
-    top_losers = [{"symbol": s, "move_pct": m} for s, m in moves[:5]]
-    top_gainers = [{"symbol": s, "move_pct": m} for s, m in moves[-5:][::-1]]
+    # Position-attribution: top 5 movers over the week.
+    top_gainers, top_losers = top_movers(daily_runs, n=5)
+    metrics["top_gainers_week"] = top_gainers
+    metrics["top_losers_week"] = top_losers
 
     # Concentration: top-3 weights as % of equity from latest run.
-    targets = last_run.get("target_weights", {})
-    sorted_w = sorted(targets.values(), reverse=True)
-    top3_concentration = sum(sorted_w[:3]) if sorted_w else 0.0
-
-    return {
-        "n_days": n,
-        "n_daily_returns": len(daily_returns),
-        "equity_start": round(equities[0], 2),
-        "equity_end": round(equities[-1], 2),
-        "total_return_pct": round(total_return * 100, 4),
-        "ann_sharpe": round(sharpe, 3),
-        "max_drawdown_pct": round(max_dd * 100, 4),
-        "win_rate_pct": round(win_rate * 100, 2),
-        "n_winning_days": n_pos,
-        "n_losing_days": n_neg,
-        "top_gainers_week": top_gainers,
-        "top_losers_week": top_losers,
-        "top3_concentration_pct": round(top3_concentration * 100, 2),
-        "n_positions_latest_run": len(targets),
-    }
+    if daily_runs:
+        last_run = max(daily_runs, key=lambda r: r.get("date", ""))
+        targets = last_run.get("target_weights", {})
+        sorted_w = sorted(targets.values(), reverse=True)
+        top3 = sum(sorted_w[:3]) if sorted_w else 0.0
+        metrics["top3_concentration_pct"] = round(top3 * 100, 2)
+        metrics["n_positions_latest_run"] = len(targets)
+    else:
+        metrics["top3_concentration_pct"] = 0.0
+        metrics["n_positions_latest_run"] = 0
+    return metrics
 
 
 def run_weekly_review(
@@ -208,20 +154,10 @@ def run_weekly_review(
                 )
                 hrp_diag = diag   # surface for the AI analyst
                 # Persist the new weights + bump the refit date.
-                updated_state = EnsembleState(
-                    sma_fast=state.sma_fast, sma_slow=state.sma_slow,
-                    mr_lookback=state.mr_lookback,
-                    mr_threshold_pct=state.mr_threshold_pct,
-                    mr_allow_short=state.mr_allow_short,
-                    xsec_top_k=state.xsec_top_k,
-                    xsec_lookback=state.xsec_lookback,
-                    xsec_skip=state.xsec_skip,
+                updated_state = replace(
+                    state,
                     hrp_weights=new_hrp,
                     last_hrp_refit_date=for_date.isoformat(),
-                    ai_strategy_names=list(state.ai_strategy_names),
-                    ai_strategy_shadow_until=dict(state.ai_strategy_shadow_until),
-                    trail_high=dict(state.trail_high),
-                    trail_pct=state.trail_pct,
                 )
                 save_ensemble_state(updated_state, path=state_path)
                 refit_notes.append("**HRP weights refit:**")

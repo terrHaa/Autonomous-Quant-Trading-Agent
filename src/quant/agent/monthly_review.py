@@ -25,7 +25,7 @@ import argparse
 import logging
 import math
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -38,7 +38,6 @@ from quant.agent.ai_analyst import (
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import (
-    EnsembleState,
     load_ensemble_state,
     save_ensemble_state,
 )
@@ -62,6 +61,7 @@ from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
 from quant.data.universe import load_top50_snapshot
+from quant.util.equity_stats import daily_returns, equity_series_stats, top_movers
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +78,17 @@ def _compute_monthly_metrics(
 ) -> dict:
     """30-day statistical view for the monthly analyst.
 
-    Different from _compute_weekly_metrics in scope and intent:
-      - Weekly metrics are about THIS week (headline + attribution)
-      - Monthly metrics are about LONGER trends and patterns that a
-        4-week-window of weekly summaries would miss:
-          • Lag-1 autocorrelation of returns (trend vs MR regime)
-          • Day-of-week breakdown (catches calendar effects)
-          • Position persistence (book stability)
-          • HRP weight drift over the full month
-          • Streak analysis (psychology + tail risk)
-          • Top-10 movers (vs top-5 in weekly — broader attribution)
-          • Raw daily-return series (analyst can run its own stats)
+    Builds on the same base stats as the weekly review (Sharpe, max DD,
+    daily returns — shared via ``util.equity_stats``), then layers on
+    longer-horizon patterns a 4-week window of weekly summaries would
+    miss:
+      • Lag-1 autocorrelation of returns (trend vs MR regime)
+      • Day-of-week breakdown (catches calendar effects)
+      • Position persistence (book stability)
+      • HRP weight drift over the full month
+      • Streak analysis (psychology + tail risk)
+      • Top-10 movers (vs top-5 in weekly — broader attribution)
+      • Raw daily-return series (analyst can run its own stats)
     The monthly analyst is directed (ANALYST.md §6 step 5b) to combine
     these statistical metrics with the weekly narratives and the raw
     daily-runs table for triangulated analysis.
@@ -96,42 +96,13 @@ def _compute_monthly_metrics(
     if not equity_curve or len(equity_curve) < 2:
         return {"insufficient_data": True, "n_days": len(equity_curve)}
 
-    days = sorted(equity_curve)
-    equities = [equity_curve[d] for d in days]
-    n = len(equities)
-
-    # Daily returns
-    daily_returns: list[float] = []
-    return_dates: list[date] = []
-    for i in range(1, n):
-        prev = equities[i - 1]
-        if prev > 0:
-            daily_returns.append(equities[i] / prev - 1.0)
-            return_dates.append(days[i])
-
-    total_return = (equities[-1] / equities[0] - 1.0) if equities[0] > 0 else 0.0
-
-    if len(daily_returns) > 1:
-        mean_r = sum(daily_returns) / len(daily_returns)
-        var = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-        std = math.sqrt(var)
-        ann_sharpe = (mean_r / std) * math.sqrt(252) if std > 0 else 0.0
-        ann_vol = std * math.sqrt(252)
-    else:
-        ann_sharpe = 0.0
-        ann_vol = 0.0
-
-    # Max intra-month drawdown
-    peak = equities[0]
-    max_dd = 0.0
-    for e in equities:
-        peak = max(peak, e)
-        if peak > 0:
-            max_dd = min(max_dd, (e - peak) / peak)
+    # Base stats (Sharpe, vol, max DD, etc.) from the shared core.
+    metrics = equity_series_stats(equity_curve)
+    return_dates, rets = daily_returns(equity_curve)
 
     # Day-of-week breakdown: Mon=0..Fri=4. Mean return + win rate per dow.
     dow_buckets: dict[int, list[float]] = {k: [] for k in range(5)}
-    for d, r in zip(return_dates, daily_returns, strict=True):
+    for d, r in zip(return_dates, rets, strict=True):
         if d.weekday() < 5:   # exclude weekends defensively (shouldn't occur)
             dow_buckets[d.weekday()].append(r)
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
@@ -148,9 +119,9 @@ def _compute_monthly_metrics(
 
     # Lag-1 autocorrelation — positive = trending/momentum regime,
     # negative = mean-reverting regime, ~0 = noise.
-    if len(daily_returns) >= 3:
-        r_prev = daily_returns[:-1]
-        r_next = daily_returns[1:]
+    if len(rets) >= 3:
+        r_prev = rets[:-1]
+        r_next = rets[1:]
         m_prev = sum(r_prev) / len(r_prev)
         m_next = sum(r_next) / len(r_next)
         cov = sum(
@@ -199,7 +170,7 @@ def _compute_monthly_metrics(
     # daily returns. Useful for psychology + tail risk reasoning.
     longest_win = longest_loss = 0
     cur_run = cur_sign = 0
-    for r in daily_returns:
+    for r in rets:
         sign = 1 if r > 0 else (-1 if r < 0 else 0)
         if sign == cur_sign and sign != 0:
             cur_run += 1
@@ -211,31 +182,10 @@ def _compute_monthly_metrics(
         elif sign < 0:
             longest_loss = max(longest_loss, cur_run)
 
-    # Top-10 gainers / losers over the FULL month by signal-price move.
-    if sorted_runs:
-        first_prices = sorted_runs[0].get("signal_prices", {})
-        last_prices = sorted_runs[-1].get("signal_prices", {})
-        moves: list[tuple[str, float]] = []
-        for sym, p0 in first_prices.items():
-            if sym in last_prices and p0 > 0:
-                moves.append((sym, last_prices[sym] / p0 - 1.0))
-        moves.sort(key=lambda x: x[1])
-        top10_losers = [{"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[:10]]
-        top10_gainers = [
-            {"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[-10:][::-1]
-        ]
-    else:
-        top10_gainers = top10_losers = []
+    # Top-10 movers over the full month — shared helper, same logic as weekly.
+    top10_gainers, top10_losers = top_movers(daily_runs, n=10)
 
-    return {
-        "n_days": n,
-        "n_daily_returns": len(daily_returns),
-        "equity_start": round(equities[0], 2),
-        "equity_end": round(equities[-1], 2),
-        "total_return_pct": round(total_return * 100, 4),
-        "ann_sharpe": round(ann_sharpe, 3),
-        "ann_realized_vol_pct": round(ann_vol * 100, 2),
-        "max_drawdown_pct": round(max_dd * 100, 4),
+    metrics.update({
         "longest_winning_streak_days": longest_win,
         "longest_losing_streak_days": longest_loss,
         "lag1_autocorrelation": round(autocorr1, 3),
@@ -246,8 +196,9 @@ def _compute_monthly_metrics(
         "top10_losers_month": top10_losers,
         # Raw daily-return series — empowers the analyst to compute its
         # own statistics (e.g., rolling Sharpe, regime breaks).
-        "daily_returns_pct": [round(r * 100, 3) for r in daily_returns],
-    }
+        "daily_returns_pct": [round(r * 100, 3) for r in rets],
+    })
+    return metrics
 
 
 def run_monthly_review(
@@ -346,21 +297,11 @@ def run_monthly_review(
                     f"{improvement_result.reason}"
                 )
                 if auto_apply:
-                    new_state = EnsembleState(
-                        sma_fast=current_state.sma_fast,
-                        sma_slow=current_state.sma_slow,
-                        mr_lookback=current_state.mr_lookback,
-                        mr_threshold_pct=current_state.mr_threshold_pct,
-                        mr_allow_short=current_state.mr_allow_short,
+                    new_state = replace(
+                        current_state,
                         xsec_top_k=best.params.top_k,
                         xsec_lookback=best.params.lookback,
                         xsec_skip=best.params.skip,
-                        hrp_weights=current_state.hrp_weights,
-                        last_hrp_refit_date=current_state.last_hrp_refit_date,
-                        ai_strategy_names=list(current_state.ai_strategy_names),
-                        ai_strategy_shadow_until=dict(current_state.ai_strategy_shadow_until),
-                        trail_high=dict(current_state.trail_high),
-                        trail_pct=current_state.trail_pct,
                     )
                     save_ensemble_state(new_state, path=params_path)
                     # Update current_state so the AI step sees the new params.
@@ -406,9 +347,9 @@ def run_monthly_review(
     try:
         # Load the past ~4 weekly reports so the monthly analyst builds
         # on the weekly analyst's curated observations (esp. items the
-        # weekly side flagged as "WORTH ESCALATING TO MONTHLY REVIEW").
-        # Empty list when no weekly reports exist yet — analyst handles
-        # that case explicitly per ANALYST.md §6 step 5a.
+        # weekly side flagged with ai_analyst.ESCALATION_MARKER). Empty
+        # list when no weekly reports exist yet — analyst handles that
+        # case explicitly per ANALYST.md §6 step 5a.
         recent_weeklies = load_recent_weekly_reports(before=for_date, n=4)
         if recent_weeklies:
             recommendations.append(
@@ -518,21 +459,11 @@ def run_monthly_review(
                     new_shadow_map = dict(current_state.ai_strategy_shadow_until)
                     new_shadow_map[proposal.name] = shadow_end.isoformat()
 
-                    final_state = EnsembleState(
-                        sma_fast=current_state.sma_fast,
-                        sma_slow=current_state.sma_slow,
-                        mr_lookback=current_state.mr_lookback,
-                        mr_threshold_pct=current_state.mr_threshold_pct,
-                        mr_allow_short=current_state.mr_allow_short,
-                        xsec_top_k=current_state.xsec_top_k,
-                        xsec_lookback=current_state.xsec_lookback,
-                        xsec_skip=current_state.xsec_skip,
-                        hrp_weights=current_state.hrp_weights,   # unchanged — no allocation yet
-                        last_hrp_refit_date=current_state.last_hrp_refit_date,
+                    # hrp_weights unchanged — no allocation until graduation.
+                    final_state = replace(
+                        current_state,
                         ai_strategy_names=new_ai_names,
                         ai_strategy_shadow_until=new_shadow_map,
-                        trail_high=dict(current_state.trail_high),
-                        trail_pct=current_state.trail_pct,
                     )
                     save_ensemble_state(final_state, path=params_path)
                     recommendations.append(

@@ -50,7 +50,7 @@ from typing import Any
 from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import build_strategies, load_ensemble_state
-from quant.agent.log import load_daily_run
+from quant.agent.log import _atomic_write_text, load_daily_run
 from quant.data.universe import load_top50_snapshot
 
 logger = logging.getLogger(__name__)
@@ -375,16 +375,14 @@ def _check_alpaca_connectivity(executor: Any = None) -> AuditCheck:
     doesn't fail the audit on an otherwise-healthy pipeline. Aligns
     with how the daily-trade routine handles the same flake.
     """
-    import requests.exceptions as _req_exc
-
     from quant.execution.alpaca_executor import AlpacaExecutor
-    from quant.util.retry import retry_on_transient
+    from quant.util.retry import HTTP_TRANSIENT, retry_on_transient
 
     ex = executor or AlpacaExecutor()
     try:
         acct = retry_on_transient(
             lambda: ex._client.get_account(),
-            transient=(_req_exc.ConnectionError, _req_exc.SSLError, _req_exc.Timeout),
+            transient=HTTP_TRANSIENT,
             description="audit connectivity check",
         )
         return AuditCheck(
@@ -431,48 +429,29 @@ def run_daily_audit(
     audits_dir = audits_dir or Path("data/agent/audits")
     audits_dir.mkdir(parents=True, exist_ok=True)
 
-    checks: list[AuditCheck] = []
+    # Uniform defensive wrap so the audit's "every check runs to
+    # completion" contract holds even if a check raises (e.g. corrupt
+    # run JSON, weird FS permissions on the launchd-logs dir).
+    def _safe_run(name: str, fn: Callable[[], AuditCheck]) -> AuditCheck:
+        try:
+            return fn()
+        except Exception as e:
+            return AuditCheck(
+                name=name,
+                passed=False,
+                message=f"check raised {type(e).__name__}: {e}",
+                details={"traceback": traceback.format_exc()},
+            )
 
-    # 1. Run record exists & well-formed.
-    checks.append(_check_run_record(for_date, runs_dir=runs_dir))
-
-    # 2. Broker reconciliation.
-    try:
-        checks.append(_check_broker_reconciliation(
+    checks: list[AuditCheck] = [
+        _safe_run("run_record", lambda: _check_run_record(for_date, runs_dir=runs_dir)),
+        _safe_run("broker_reconciliation", lambda: _check_broker_reconciliation(
             for_date, runs_dir=runs_dir, executor=executor,
-        ))
-    except Exception as e:
-        # Defensive: never let one check crash the rest.
-        checks.append(AuditCheck(
-            name="broker_reconciliation",
-            passed=False,
-            message=f"check raised {type(e).__name__}: {e}",
-            details={"traceback": traceback.format_exc()},
-        ))
-
-    # 3. Ensemble state integrity.
-    try:
-        checks.append(_check_ensemble_state())
-    except Exception as e:
-        checks.append(AuditCheck(
-            name="ensemble_state",
-            passed=False,
-            message=f"check raised {type(e).__name__}: {e}",
-            details={"traceback": traceback.format_exc()},
-        ))
-
-    # 4. Recent launchd error logs.
-    checks.append(_check_recent_error_logs(log_dir=log_dir))
-
-    # 5. Connectivity.
-    try:
-        checks.append(_check_alpaca_connectivity(executor=executor))
-    except Exception as e:
-        checks.append(AuditCheck(
-            name="connectivity",
-            passed=False,
-            message=f"check raised {type(e).__name__}: {e}",
-        ))
+        )),
+        _safe_run("ensemble_state", lambda: _check_ensemble_state()),
+        _safe_run("error_logs", lambda: _check_recent_error_logs(log_dir=log_dir)),
+        _safe_run("connectivity", lambda: _check_alpaca_connectivity(executor=executor)),
+    ]
 
     report = AuditReport(
         for_date=for_date.isoformat(),
@@ -480,9 +459,11 @@ def run_daily_audit(
         checks=checks,
     )
 
-    # Persist the JSON record.
+    # Persist the JSON record. Atomic write so a launchd kill mid-write
+    # can't corrupt yesterday's audit (matches save_daily_run / save_weekly_report
+    # / save_ensemble_state pattern).
     out_path = audits_dir / f"{for_date.isoformat()}.json"
-    out_path.write_text(json.dumps({
+    _atomic_write_text(out_path, json.dumps({
         "for_date": report.for_date,
         "timestamp": report.timestamp,
         "passed": report.passed,

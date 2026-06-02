@@ -179,13 +179,11 @@ class AlpacaDataClient:
         # through a VPN/proxy. A fresh connection a few seconds later
         # almost always succeeds. Auth errors (401/403) come back as
         # APIError, NOT in `transient`, so they're not retried.
-        import requests.exceptions as _req_exc
-
-        from quant.util.retry import retry_on_transient
+        from quant.util.retry import HTTP_TRANSIENT, retry_on_transient
 
         barset = retry_on_transient(
             lambda: self._client.get_stock_bars(request),
-            transient=(_req_exc.ConnectionError, _req_exc.SSLError, _req_exc.Timeout),
+            transient=HTTP_TRANSIENT,
             description=f"Alpaca bars fetch ({len(symbols)} symbols)",
         )
         df = barset.df

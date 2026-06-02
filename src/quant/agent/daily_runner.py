@@ -28,6 +28,7 @@ import argparse
 import logging
 import sys
 import traceback
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -149,21 +150,10 @@ def run_daily_trade(
             for name in graduated:
                 new_hrp[name] = equal_w
 
-            state = EnsembleState(
-                sma_fast=state.sma_fast,
-                sma_slow=state.sma_slow,
-                mr_lookback=state.mr_lookback,
-                mr_threshold_pct=state.mr_threshold_pct,
-                mr_allow_short=state.mr_allow_short,
-                xsec_top_k=state.xsec_top_k,
-                xsec_lookback=state.xsec_lookback,
-                xsec_skip=state.xsec_skip,
+            state = replace(
+                state,
                 hrp_weights=new_hrp,
-                last_hrp_refit_date=state.last_hrp_refit_date,
-                ai_strategy_names=list(state.ai_strategy_names),
                 ai_strategy_shadow_until=still_shadow,
-                trail_high=dict(state.trail_high),
-                trail_pct=state.trail_pct,
             )
             save_ensemble_state(state)
             logger.info(
@@ -249,22 +239,7 @@ def run_daily_trade(
     # Persist the new trail map back to disk (skipping on dry-run so test
     # / debug invocations don't pollute live state).
     if not dry_run:
-        state = EnsembleState(
-            sma_fast=state.sma_fast,
-            sma_slow=state.sma_slow,
-            mr_lookback=state.mr_lookback,
-            mr_threshold_pct=state.mr_threshold_pct,
-            mr_allow_short=state.mr_allow_short,
-            xsec_top_k=state.xsec_top_k,
-            xsec_lookback=state.xsec_lookback,
-            xsec_skip=state.xsec_skip,
-            hrp_weights=state.hrp_weights,
-            last_hrp_refit_date=state.last_hrp_refit_date,
-            ai_strategy_names=list(state.ai_strategy_names),
-            ai_strategy_shadow_until=dict(state.ai_strategy_shadow_until),
-            trail_high=new_trail,
-            trail_pct=state.trail_pct,
-        )
+        state = replace(state, trail_high=new_trail)
         save_ensemble_state(state)
 
     # --- 5. Persist the full record. ---
