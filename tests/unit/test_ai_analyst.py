@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
-
 from quant.agent.ai_analyst import (
     AIAnalyst,
     AnalysisReport,
@@ -22,7 +20,6 @@ from quant.agent.ai_analyst import (
     _build_weekly_system_prompt,
     _parse_json_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # JSON parsing helper
@@ -221,15 +218,27 @@ def test_system_prompt_includes_anti_pattern_signal_terms() -> None:
 def test_weekly_system_prompt_loads_weekly_role_not_monthly() -> None:
     """Weekly prompt should NOT include EDGE_TAXONOMY or ANTI_PATTERNS
     (saves ~7k tokens; those files are about proposing new edges and the
-    weekly analyst is explicitly forbidden from doing that)."""
+    weekly analyst is explicitly forbidden from doing that).
+
+    We check for DISTINCTIVE CONTENT from each file, not the file names
+    themselves — MEMORY.md gets monthly entries that may reference the
+    other files by name, and that's fine; we just don't want the full
+    contents loaded into weekly's prompt.
+    """
     prompt = _build_weekly_system_prompt()
-    assert "WEEKLY_ANALYST.md" in prompt
-    assert "STRATEGY_LIBRARY.md" in prompt
-    assert "MEMORY.md" in prompt
-    # These should NOT be present in weekly mode:
-    assert "EDGE_TAXONOMY" not in prompt
-    assert "ANTI_PATTERNS" not in prompt
-    # Distinctive content from WEEKLY_ANALYST.md
+    # Loaded files (header markers from _build_weekly_system_prompt):
+    assert "WEEKLY_ANALYST.md (your role for this call)" in prompt
+    assert "STRATEGY_LIBRARY.md (the ensemble you are analyzing)" in prompt
+    assert "MEMORY.md (history from the monthly analyst" in prompt
+    # NOT loaded — check via header marker that only appears when the
+    # file is actually concatenated in:
+    assert "EDGE_TAXONOMY.md (the space of possible edges" not in prompt
+    assert "ANTI_PATTERNS.md (failure modes" not in prompt
+    # Distinctive content unique to those files (would only appear if
+    # the full file body were loaded, not from a passing mention in MEMORY):
+    assert "Coverage Map" not in prompt           # EDGE_TAXONOMY heading
+    assert "Famous dead anomalies" not in prompt   # ANTI_PATTERNS heading
+    # Distinctive content from WEEKLY_ANALYST.md (must be present):
     assert "performance analyst" in prompt.lower()
     assert "Forbidden behaviors" in prompt or "forbidden" in prompt.lower()
 

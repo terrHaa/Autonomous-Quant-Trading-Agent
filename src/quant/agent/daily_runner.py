@@ -75,6 +75,49 @@ LOOKBACK_BUFFER_DAYS = 30       # extra bars to cover non-trading days
 # ---------------------------------------------------------------------------
 
 
+# Wall-clock guard. If the launchd KeepAlive auto-retry is still kicking
+# this many hours after the scheduled fire (09:35 ET), the trade window
+# is mostly gone — better to skip than rebalance into the last 30 minutes
+# of the session on stale signals. Set to 6h post-open = 15:35 ET (the
+# close is 16:00 ET; 25 min before close is too risky).
+_TRADE_DEADLINE_HOURS_AFTER_OPEN = 6
+
+
+def _outside_trade_window(today_iso_date: date) -> bool:
+    """True iff current US/Eastern wall clock is NOT inside the trade window
+    for today_iso_date. The window is 09:00–15:35 ET on the trade day.
+
+    This guard covers BOTH ends:
+
+    - Before 09:00 ET: an off-schedule launchd KeepAlive fire (which can
+      happen on plist reload — "never ran" satisfies "not SuccessfulExit")
+      would otherwise trade at e.g. 23:00 ET the previous evening. The
+      orders would just queue overnight at the broker; functionally OK,
+      but wastes idempotency budget and clobbers any state the operator
+      might want to inspect before market open. Cleaner to no-op and let
+      the scheduled 09:35 ET fire do its job.
+
+    - After 15:35 ET: KeepAlive kill switch. If the trade has been failing
+      for 6+ hours after the scheduled fire, the trade window is too close
+      to the close to safely rebalance. Stop retrying; tomorrow's
+      scheduled fire will resume normally.
+
+    Returns False (i.e. "we're in the window, please trade") for now_ET
+    on the same calendar date as today_iso_date, between 09:00 and 15:35.
+    """
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    if now_et.date() != today_iso_date:
+        # Date doesn't match today's date in ET → out of window
+        # (e.g. CST evening before market open in ET).
+        return True
+    window_open = time(9, 0)
+    window_close = time(9 + _TRADE_DEADLINE_HOURS_AFTER_OPEN, 35)   # 15:35 ET
+    return not (window_open <= now_et.time() <= window_close)
+
+
 def run_daily_trade(
     *,
     dry_run: bool = False,
@@ -85,11 +128,21 @@ def run_daily_trade(
     executor: AlpacaExecutor | None = None,
     runs_dir: Path | None = None,
     ensemble_state: EnsembleState | None = None,
-) -> Path:
-    """Execute today's trade cycle. Returns the path of the saved JSON log.
+) -> Path | None:
+    """Execute today's trade cycle. Returns the path of the saved JSON log,
+    or None if the routine exited early via idempotency / deadline guard.
 
     Every dependency can be injected for tests; in production they
     default to the real components.
+
+    Idempotency: returns early without re-trading if today's run JSON
+    already exists. This makes the routine SAFE to re-fire (e.g. via
+    launchd KeepAlive after a transient failure) — only the first call
+    that lands a JSON actually trades.
+
+    Deadline: returns early without trading if the wall clock is past
+    15:35 ET on ``today``. Kill switch for the KeepAlive auto-retry
+    loop — once the trade window is gone, stop retrying.
 
     Parameters
     ----------
@@ -102,6 +155,28 @@ def run_daily_trade(
     """
     today = today or date.today()
     config = config or load_config()
+
+    # --- 0. Idempotency + deadline guards (BEFORE expensive work) ---
+    # Run-record check FIRST so a retry after a successful trade is a
+    # cheap no-op. Skipped on dry_run since dry runs don't persist.
+    if not dry_run:
+        existing = load_daily_run(today, runs_dir=runs_dir)
+        if existing is not None:
+            logger.info(
+                "run_daily_trade: today's run already persisted "
+                "(%d orders); idempotent skip.",
+                len(existing.get("execution_report", {}).get("submitted_orders", [])),
+            )
+            return None
+    if _outside_trade_window(today):
+        logger.warning(
+            "run_daily_trade: outside 09:00-15:35 ET trade window for %s; "
+            "exiting cleanly (no-op). KeepAlive may have fired us off-schedule, "
+            "or the trade window has closed.",
+            today,
+        )
+        return None
+
     universe = universe or load_top50_snapshot()
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
@@ -441,7 +516,12 @@ def cli_run_trade() -> None:
     args = parser.parse_args()
     try:
         path = run_daily_trade(dry_run=args.dry_run)
-        print(f"[agent] daily trade complete; log: {path}")
+        if path is None:
+            # Idempotent skip OR past-deadline skip. Both are clean exits
+            # so launchd's KeepAlive doesn't keep re-firing.
+            print("[agent] daily trade skipped (idempotent or past deadline)")
+        else:
+            print(f"[agent] daily trade complete; log: {path}")
     except Exception as e:
         _email_failure("daily trade", e)
         raise

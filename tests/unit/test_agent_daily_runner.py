@@ -25,6 +25,18 @@ from quant.execution.alpaca_executor import (
     SubmittedOrder,
 )
 
+
+@pytest.fixture
+def _in_trade_window(monkeypatch):
+    """Mark the test as 'inside the trade window' so the 09:00-15:35 ET
+    guard doesn't trip on fixed historical test dates.
+
+    NOT autouse — tests that directly call `_outside_trade_window()`
+    (the helper unit tests) need the real function. Tests that go
+    through `run_daily_trade()` request this fixture explicitly.
+    """
+    monkeypatch.setattr(daily_runner, "_outside_trade_window", lambda _d: False)
+
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
@@ -120,7 +132,128 @@ def _make_bars(symbols: list[str], n_days: int = 100, *, trend: float = 0.5) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_run_daily_trade_persists_a_json_record(tmp_path: Path) -> None:
+def test_run_daily_trade_is_idempotent_when_record_exists(tmp_path: Path, _in_trade_window) -> None:
+    """Re-firing on a day whose run JSON already exists must be a no-op.
+
+    This is what makes launchd KeepAlive safe: after a SUCCESSFUL trade,
+    subsequent retries (until tomorrow's scheduled fire) detect the
+    existing record and exit cleanly without re-trading. Saturday's
+    audit will then see one clean run.
+    """
+    universe = [f"SYM{i}" for i in range(10)]
+    bars = _make_bars(universe, n_days=100)
+    cache = _FakeCache(bars)
+    executor = _FakeExecutor()
+
+    # First call: produces the JSON.
+    first = daily_runner.run_daily_trade(
+        today=date(2024, 6, 3),
+        universe=universe, cache=cache, executor=executor,
+        runs_dir=tmp_path,
+    )
+    assert first is not None and first.exists()
+    first_call_snapshot = dict(executor.last_call)
+    # Mutate last_call so we can detect a 2nd invocation by it being overwritten.
+    executor.last_call = {"_idempotency_marker": True}
+
+    # Second call (simulates launchd KeepAlive retry).
+    second = daily_runner.run_daily_trade(
+        today=date(2024, 6, 3),
+        universe=universe, cache=cache, executor=executor,
+        runs_dir=tmp_path,
+    )
+    # Idempotent skip → no new path, no new orders.
+    assert second is None
+    assert executor.last_call == {"_idempotency_marker": True}, (
+        "executor should NOT have been called again on the second run"
+    )
+    assert first_call_snapshot, "first call should have hit the executor"
+
+
+def test_run_daily_trade_skips_outside_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If wall-clock is outside 09:00-15:35 ET on the trade day, the routine
+    exits early without trading. Covers both ends:
+      - early off-schedule launchd KeepAlive fire (e.g. plist reload at 23:00 ET)
+      - late KeepAlive-loop kill switch (after 15:35 ET).
+    """
+    monkeypatch.setattr(
+        daily_runner, "_outside_trade_window", lambda _d: True,
+    )
+    universe = [f"SYM{i}" for i in range(5)]
+    cache = _FakeCache(_make_bars(universe, n_days=10))
+    executor = _FakeExecutor()
+    result = daily_runner.run_daily_trade(
+        today=date(2024, 6, 3),
+        universe=universe, cache=cache, executor=executor,
+        runs_dir=tmp_path,
+    )
+    assert result is None
+    # No persistence happened.
+    assert not (tmp_path / "2024-06-03.json").exists()
+    # No broker calls.
+    assert executor.last_call == {}
+
+
+def test_outside_trade_window_inside_returns_false(monkeypatch) -> None:
+    """Helper unit test: 10:00 ET on the trade date is inside the window."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2024, 6, 3, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    import datetime as _dt
+    real_dt = _dt.datetime
+    _dt.datetime = _FakeDatetime   # type: ignore[misc]
+    try:
+        assert daily_runner._outside_trade_window(date(2024, 6, 3)) is False
+    finally:
+        _dt.datetime = real_dt   # type: ignore[misc]
+
+
+def test_outside_trade_window_too_early_returns_true(monkeypatch) -> None:
+    """05:00 ET on the trade date is BEFORE the 09:00 window open → out."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2024, 6, 3, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    import datetime as _dt
+    real_dt = _dt.datetime
+    _dt.datetime = _FakeDatetime   # type: ignore[misc]
+    try:
+        assert daily_runner._outside_trade_window(date(2024, 6, 3)) is True
+    finally:
+        _dt.datetime = real_dt   # type: ignore[misc]
+
+
+def test_outside_trade_window_too_late_returns_true(monkeypatch) -> None:
+    """16:00 ET on the trade date is AFTER the 15:35 deadline → out."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2024, 6, 3, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    import datetime as _dt
+    real_dt = _dt.datetime
+    _dt.datetime = _FakeDatetime   # type: ignore[misc]
+    try:
+        assert daily_runner._outside_trade_window(date(2024, 6, 3)) is True
+    finally:
+        _dt.datetime = real_dt   # type: ignore[misc]
+
+
+def test_run_daily_trade_persists_a_json_record(tmp_path: Path, _in_trade_window) -> None:
     """The runner must write data/agent/runs/<date>.json so the report
     routine can find it later in the day."""
     universe = [f"SYM{i}" for i in range(20)]
@@ -146,7 +279,7 @@ def test_run_daily_trade_persists_a_json_record(tmp_path: Path) -> None:
         assert key in payload
 
 
-def test_run_daily_trade_passes_operator_constants_to_executor(tmp_path: Path) -> None:
+def test_run_daily_trade_passes_operator_constants_to_executor(tmp_path: Path, _in_trade_window) -> None:
     """20% cap and 5% stop-loss are HARD-CODED at the agent level —
     verify they flow through to the executor call regardless of
     upstream config defaults."""
@@ -167,7 +300,7 @@ def test_run_daily_trade_passes_operator_constants_to_executor(tmp_path: Path) -
     assert executor.last_call["max_position_weight"] == daily_runner.MAX_POSITION_WEIGHT == 0.20
 
 
-def test_run_daily_trade_includes_held_names_in_signal_prices(tmp_path: Path) -> None:
+def test_run_daily_trade_includes_held_names_in_signal_prices(tmp_path: Path, _in_trade_window) -> None:
     """If we currently hold a name not in the target book, the runner
     must still pass its signal price so the executor can size the
     close-out order."""
@@ -191,7 +324,7 @@ def test_run_daily_trade_includes_held_names_in_signal_prices(tmp_path: Path) ->
     assert "SYM5" in executor.last_call["signal_prices"]
 
 
-def test_run_daily_trade_raises_on_empty_bars(tmp_path: Path) -> None:
+def test_run_daily_trade_raises_on_empty_bars(tmp_path: Path, _in_trade_window) -> None:
     """Empty bars (cache or Alpaca outage) → hard failure, no silent
     'we just won't trade' behavior."""
     empty = pd.DataFrame(

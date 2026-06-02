@@ -55,5 +55,29 @@
          quant-daily-trade --dry-run` first to sanity-check. -->
     <key>RunAtLoad</key>
     <false/>
+
+    <!-- KeepAlive auto-retry: if the trade routine exits non-zero
+         (e.g. DNS flake, VPN tunnel re-establishment, transient broker
+         outage), launchd re-fires the entire job. Combined with
+         ThrottleInterval=300, retries are spaced 5 minutes apart, so
+         the loop tops out at ~12 retries per hour.
+
+         The retry loop is bounded automatically:
+           - On success: run_daily_trade saves today's run JSON; next
+             fire detects it via the idempotency guard and exits clean.
+           - On persistent failure: _past_trade_deadline() (15:35 ET)
+             returns early with exit 0 once the trade window closes,
+             ending the retry loop until tomorrow's StartCalendarInterval.
+
+         Without KeepAlive, a one-time DNS hang at 09:35 ET = a lost
+         trading day (June 2026 incident). With it, the same hang costs
+         5 minutes at most. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
 </dict>
 </plist>

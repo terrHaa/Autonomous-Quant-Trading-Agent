@@ -9,11 +9,9 @@ broker-reconciliation script the operator can run manually.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
 
 from quant.agent.audit import (
     AuditCheck,
@@ -26,7 +24,6 @@ from quant.agent.audit import (
     _render_email,
     run_daily_audit,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -268,7 +265,7 @@ def test_old_err_log_ignored(tmp_path: Path) -> None:
     fp.write_text("Traceback: very old error\n")   # has marker
     # Set mtime to 48h ago.
     import os
-    old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=48)).timestamp()
+    old_ts = (datetime.now(tz=UTC) - timedelta(hours=48)).timestamp()
     os.utime(fp, (old_ts, old_ts))
     check = _check_recent_error_logs(log_dir=tmp_path, hours=26)
     assert check.passed, check.message
