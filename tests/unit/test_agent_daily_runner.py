@@ -170,6 +170,125 @@ def test_run_daily_trade_is_idempotent_when_record_exists(tmp_path: Path, _in_tr
     assert first_call_snapshot, "first call should have hit the executor"
 
 
+# ---------------------------------------------------------------------------
+# T1.5 — ATR-normalized per-symbol stops
+# ---------------------------------------------------------------------------
+
+
+def _make_bars_with_vol(
+    symbols: list[str], n_days: int = 30, *, daily_vol: float = 0.01,
+) -> pd.DataFrame:
+    """Make bars where each symbol's daily returns have the requested std.
+
+    Uses a fixed seed per symbol so tests are deterministic.
+    """
+    import numpy as np
+    days = pd.bdate_range("2024-01-02", periods=n_days, tz="UTC")
+    rows, idx = [], []
+    for i, sym in enumerate(symbols):
+        rng = np.random.default_rng(seed=42 + i)
+        rets = rng.normal(0.0, daily_vol, n_days - 1)
+        prices = [100.0]
+        for r in rets:
+            prices.append(prices[-1] * (1 + r))
+        for k, ts in enumerate(days):
+            c = prices[k]
+            rows.append({
+                "open": c, "high": c * 1.005, "low": c * 0.995,
+                "close": c, "volume": 1_000_000,
+            })
+            idx.append((sym, ts))
+    return pd.DataFrame(
+        rows,
+        index=pd.MultiIndex.from_tuples(idx, names=["symbol", "timestamp"]),
+        columns=list(BAR_COLUMNS),
+    )
+
+
+def test_atr_stops_tighter_for_low_vol_names() -> None:
+    """A name with 0.5% daily vol should get a stop near 1.5% (3-sigma),
+    far tighter than the 5% flat default."""
+    bars = _make_bars_with_vol(["LOWVOL"], n_days=30, daily_vol=0.005)
+    stops = daily_runner._compute_atr_normalized_stops(
+        symbols=["LOWVOL"], bars=bars,
+    )
+    assert "LOWVOL" in stops
+    # 3-sigma of 0.5% vol = 1.5% → expect stop near that, well below 5%.
+    assert stops["LOWVOL"] < 0.025
+    assert stops["LOWVOL"] >= daily_runner.ATR_MIN_STOP
+
+
+def test_atr_stops_capped_at_operator_floor_for_high_vol() -> None:
+    """A high-vol name (5% daily) would suggest a 15% stop; clip at 5%."""
+    bars = _make_bars_with_vol(["HIGHVOL"], n_days=30, daily_vol=0.05)
+    stops = daily_runner._compute_atr_normalized_stops(
+        symbols=["HIGHVOL"], bars=bars,
+    )
+    # Operator's hard rule: max stop is STOP_LOSS_PCT (5%).
+    assert stops["HIGHVOL"] == daily_runner.STOP_LOSS_PCT
+
+
+def test_atr_stops_fallback_for_short_history() -> None:
+    """A symbol with insufficient bars falls back to the flat default."""
+    bars = _make_bars_with_vol(["SHORT"], n_days=5, daily_vol=0.01)
+    stops = daily_runner._compute_atr_normalized_stops(
+        symbols=["SHORT"], bars=bars,
+    )
+    # Default lookback is 20; 5 bars insufficient → falls back to floor.
+    assert stops["SHORT"] == daily_runner.STOP_LOSS_PCT
+
+
+# ---------------------------------------------------------------------------
+# T1.3 — Vol-targeting
+# ---------------------------------------------------------------------------
+
+
+def test_vol_target_scales_down_high_vol_book() -> None:
+    """A portfolio of high-vol names with realized vol > target should
+    have its weights scaled DOWN."""
+    import yaml
+
+    from quant.config import DEFAULT_CONFIG_PATH, Config
+    config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
+
+    # Three names, each at 3% daily vol → ~48% annualized.
+    # Equal-weight 1/3 each → portfolio vol ≈ 30%+ annualized.
+    # Target is 10% → scale should be < 1.
+    bars = _make_bars_with_vol(
+        ["A", "B", "C"], n_days=80, daily_vol=0.03,
+    )
+    weights = {"A": 1 / 3, "B": 1 / 3, "C": 1 / 3}
+    scaled = daily_runner._apply_vol_target(
+        target_weights=weights, bars=bars, config=config, lookback=60,
+    )
+    # Gross exposure should drop meaningfully.
+    pre = sum(weights.values())
+    post = sum(scaled.values())
+    assert post < pre * 0.8, (
+        f"high-vol book should scale down by >20% to hit 10% target; "
+        f"got pre={pre:.3f}, post={post:.3f}"
+    )
+
+
+def test_vol_target_returns_original_when_bars_unavailable() -> None:
+    """Fail-safe: insufficient/empty bars → weights unchanged."""
+    import yaml
+
+    from quant.config import DEFAULT_CONFIG_PATH, Config
+    config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
+    empty = pd.DataFrame()
+    weights = {"AAPL": 0.5, "MSFT": 0.5}
+    scaled = daily_runner._apply_vol_target(
+        target_weights=weights, bars=empty, config=config,
+    )
+    assert scaled == weights
+
+
+# ---------------------------------------------------------------------------
+# Kill switch (existing tests follow)
+# ---------------------------------------------------------------------------
+
+
 def test_kill_switch_tripped_when_drawdown_exceeds_threshold(tmp_path: Path) -> None:
     """If equity is more than threshold% below peak (computed from run JSONs),
     the kill switch trips. Reads peak across the persisted run history."""

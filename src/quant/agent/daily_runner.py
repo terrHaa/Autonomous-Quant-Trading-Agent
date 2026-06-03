@@ -79,6 +79,25 @@ MAX_POSITION_WEIGHT = 0.05      # 5% per-trade cap (was 20%; tightened to
 # the operator intervenes. Mirrors configs/default.yaml: risk.max_drawdown_kill.
 MAX_DRAWDOWN_KILL = 0.15        # -15% halts new entries
 
+# ATR-normalized stop parameters. The per-symbol stop_pct is computed as
+#   stop_pct = clip(ATR_MULTIPLIER * realized_vol, ATR_MIN_STOP, STOP_LOSS_PCT)
+# where realized_vol = std of last ATR_VOL_LOOKBACK daily returns.
+# Effect: low-vol names get tighter stops (e.g. 2-3% for KO) so we don't
+# sit through unnecessary drawdowns; high-vol names stay capped at the
+# operator's 5% floor (NVDA-like names still risk whipsaw, but the
+# alternative — looser stops than 5% — violates operator policy).
+ATR_VOL_LOOKBACK = 20            # daily-return std window
+ATR_MULTIPLIER = 3.0             # 3-sigma stop on average
+ATR_MIN_STOP = 0.005             # 0.5% floor — don't whipsaw on micro-noise
+# Slippage threshold for the post-fill stop repair. If actual fill price
+# differs from signal price by more than this %, the OTO bracket's stop
+# is in the wrong place and we replace it.
+STOP_REPAIR_DRIFT_THRESHOLD = 0.01    # 1%
+# Seconds to wait for OTO fills before running the stop-repair pass.
+# Live: ~30s is enough for market-on-open + 5-min OTO submissions to
+# fill. Tests set this to 0.
+STOP_REPAIR_WAIT_SECONDS = 30.0
+
 # Tunable parameters live in StrategyParams (persisted to
 # data/agent/strategy_params.json); the auto-improver may swap them
 # after passing safety gates. Defaults are the v1 starting point.
@@ -232,6 +251,125 @@ def _kill_switch_tripped(
         return False, peak, 0.0
     drawdown = (current_equity - peak) / peak
     return drawdown < -threshold, peak, drawdown
+
+
+def _compute_atr_normalized_stops(
+    *,
+    symbols: list[str],
+    bars,
+    lookback: int = ATR_VOL_LOOKBACK,
+    multiplier: float = ATR_MULTIPLIER,
+    min_stop: float = ATR_MIN_STOP,
+    max_stop: float = STOP_LOSS_PCT,
+) -> dict[str, float]:
+    """Per-symbol stop distance, scaled by realized daily vol.
+
+    For each symbol, realized_vol = std(returns over `lookback` days).
+    Returns ``multiplier * realized_vol`` clipped to [min_stop, max_stop].
+
+    Low-vol names → tighter stops (e.g. KO at ~1% daily vol → 3% stop).
+    High-vol names → stops are CAPPED at max_stop (operator's hard rule),
+    so NVDA-like names still get whipsawed by the 5% cap — that's a
+    policy trade-off, not a code bug. Lifting the cap would require an
+    operator policy change.
+
+    Names with insufficient bar history fall back to ``max_stop`` (the
+    operator's flat-rate default — safe).
+    """
+    out: dict[str, float] = {}
+    if bars is None or bars.empty:
+        return out
+    for sym in symbols:
+        try:
+            closes = bars.loc[sym]["close"]
+            if len(closes) < lookback + 1:
+                out[sym] = max_stop
+                continue
+            returns = closes.pct_change().dropna().tail(lookback)
+            if len(returns) < 2:
+                out[sym] = max_stop
+                continue
+            realized_vol = float(returns.std(ddof=1))
+            target = multiplier * realized_vol
+            # Clip to the operator's allowed band.
+            out[sym] = max(min_stop, min(max_stop, target))
+        except (KeyError, ValueError, AttributeError):
+            # Symbol missing from bars or bad data → safe fallback.
+            out[sym] = max_stop
+    return out
+
+
+def _apply_vol_target(
+    *,
+    target_weights: dict[str, float],
+    bars,
+    config: Config,
+    lookback: int = 60,
+) -> dict[str, float]:
+    """Scale ``target_weights`` so portfolio realized vol ≈ vol_target.
+
+    Uses ``quant.allocator.apply_vol_target`` with a per-symbol returns
+    DataFrame computed from the last ``lookback`` days of bars.
+
+    Long-only behavior: vol-targeting can either AMPLIFY (scale > 1,
+    levering up — capped by config.risk.max_gross_leverage) or DAMPEN
+    (scale < 1, reducing exposure). In practice with a long-only book,
+    the protective case (scale < 1 in high-vol regimes) is what matters
+    most. We accept the lever-up case too, capped at max_gross_leverage.
+
+    Empty/insufficient-bars input → returns weights unchanged. This is
+    the fail-safe path: vol-targeting is an OPTIMIZATION, not a safety
+    requirement; if we can't compute it, just use the original weights.
+    """
+    import pandas as pd  # noqa: PLC0415 — lazy
+
+    from quant.allocator import apply_vol_target
+
+    if not target_weights or bars is None or bars.empty:
+        return dict(target_weights)
+
+    syms = [s for s in target_weights if target_weights[s] > 0]
+    returns_by_sym: dict[str, pd.Series] = {}
+    for sym in syms:
+        try:
+            closes = bars.loc[sym]["close"]
+            r = closes.pct_change().dropna().tail(lookback)
+            if len(r) >= 10:   # need some history for a sensible vol
+                returns_by_sym[sym] = r
+        except (KeyError, ValueError, AttributeError):
+            continue
+
+    if len(returns_by_sym) < len(syms) // 2:
+        # Less than half the universe has usable history → not enough
+        # signal to scale safely. Skip vol-targeting; keep original.
+        return dict(target_weights)
+
+    returns_df = pd.concat(returns_by_sym, axis=1).dropna(how="all")
+    if returns_df.empty:
+        return dict(target_weights)
+
+    weights = pd.Series({s: target_weights[s] for s in returns_df.columns})
+    try:
+        scaled = apply_vol_target(
+            weights=weights,
+            strategy_returns=returns_df,
+            target_vol_annual=config.risk.vol_target_annual,
+            trading_days_per_year=config.evaluation.trading_days_per_year,
+            max_gross_leverage=config.risk.max_gross_leverage,
+        )
+    except Exception as e:
+        logger.warning(
+            "vol-target apply failed (%s: %s) — using original weights",
+            type(e).__name__, e,
+        )
+        return dict(target_weights)
+
+    # Merge: scaled values for symbols we computed, originals for any
+    # we couldn't (defensive).
+    out = dict(target_weights)
+    for sym, w in scaled.items():
+        out[sym] = float(w)
+    return out
 
 
 def run_daily_trade(
@@ -449,9 +587,45 @@ def run_daily_trade(
         signal_prices=signal_prices,
     )
 
+    # --- 3c. ATR-normalized per-symbol stop distances (T1.5) ----------
+    # Replace the flat 5% stop with vol-adjusted stops: tighter on
+    # low-vol names, capped at STOP_LOSS_PCT on high-vol names.
+    stop_pcts = _compute_atr_normalized_stops(
+        symbols=list(target_weights.keys()),
+        bars=bars,
+    )
+    logger.info(
+        "ATR-normalized stops: %d symbols; mean=%.2f%%, range=[%.2f%%, %.2f%%]",
+        len(stop_pcts),
+        100 * (sum(stop_pcts.values()) / len(stop_pcts)) if stop_pcts else 0,
+        100 * min(stop_pcts.values()) if stop_pcts else 0,
+        100 * max(stop_pcts.values()) if stop_pcts else 0,
+    )
+
+    # --- 3d. Vol-target the portfolio (T1.3) --------------------------
+    # Scale gross exposure so realized portfolio vol ≈ config target.
+    # The protective case is when realized vol is HIGH: we scale DOWN,
+    # reducing exposure during stormy regimes. Long-only bookkeeping
+    # is handled inside _apply_vol_target.
+    scaled_weights = _apply_vol_target(
+        target_weights=target_weights,
+        bars=bars,
+        config=config,
+    )
+    pre_gross = sum(target_weights.values())
+    post_gross = sum(scaled_weights.values())
+    if abs(post_gross - pre_gross) > 1e-6:
+        logger.info(
+            "vol-targeting: gross exposure %.4f → %.4f (scale %.3f) "
+            "to hit %.0f%% target vol",
+            pre_gross, post_gross,
+            (post_gross / pre_gross) if pre_gross > 0 else 0.0,
+            config.risk.vol_target_annual * 100,
+        )
+
     # --- 4. Submit via the executor's agent flow ---
     report = executor.submit_daily_rebalance(
-        target_weights=target_weights,
+        target_weights=scaled_weights,
         signal_prices=signal_prices,
         stop_loss_pct=STOP_LOSS_PCT,
         max_position_weight=MAX_POSITION_WEIGHT,
@@ -460,6 +634,9 @@ def run_daily_trade(
               + (" (dry-run)" if dry_run else ""),
         trail_highs=new_trail,
         trail_pct=state.trail_pct,
+        stop_pcts=stop_pcts,
+        repair_stops_after_fill=not dry_run,
+        fill_wait_seconds=STOP_REPAIR_WAIT_SECONDS,
     )
 
     # Persist the new trail map back to disk (skipping on dry-run so test

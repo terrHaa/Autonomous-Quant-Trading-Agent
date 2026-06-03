@@ -135,12 +135,13 @@ def _build_pipeline_snapshot(config: Config) -> dict:
             "_source": "configs/default.yaml",
         },
         "wiring_status": {
-            "drawdown_kill_switch_active_in_daily_trade": True,   # wired in this commit
-            "vol_targeting_active_in_daily_trade": False,         # NOT wired (TODO)
-            "sector_concentration_cap_active": False,             # NOT wired (TODO)
-            "fill_anchored_stops_active": False,                  # NOT wired (TODO)
-            "universe_uses_point_in_time_membership": False,      # uses load_top50_snapshot — survivorship-biased
-            "conviction_weighted_strategy_outputs": False,        # all 3 strategies equal-weight their picks
+            "drawdown_kill_switch_active_in_daily_trade": True,
+            "vol_targeting_active_in_daily_trade": True,           # wired in T1.3
+            "atr_normalized_stops_active": True,                   # wired in T1.5
+            "fill_anchored_stops_active": True,                    # wired in T1.4 (post-fill repair)
+            "sector_concentration_cap_active": False,              # NOT wired (TIER 2)
+            "universe_uses_point_in_time_membership": False,       # uses load_top50_snapshot — survivorship-biased (TIER 2)
+            "conviction_weighted_strategy_outputs": False,         # all 3 strategies equal-weight their picks (TIER 2)
             "_notes": (
                 "These flags indicate whether 'advertised' risk-management features are "
                 "actually called in the live trading path. A False here is a dead-code or "

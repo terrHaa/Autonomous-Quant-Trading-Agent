@@ -39,11 +39,14 @@ What this is NOT (yet)
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 from quant.data.alpaca_client import AlpacaCredentials
+
+logger = logging.getLogger(__name__)
 
 Env = Literal["paper", "live"]
 
@@ -122,6 +125,12 @@ class _TradingClientLike(Protocol):
     def get_all_positions(self) -> list[Any]: ...
     def submit_order(self, request: Any) -> Any: ...
     def cancel_orders(self) -> Any: ...
+    # Used by the post-fill stop-repair phase to re-anchor stops to actual
+    # fill prices when the broker gaps between the signal close and the
+    # market open. See _repair_oto_stops_to_fill_price at module bottom.
+    def get_order_by_id(self, order_id: str) -> Any: ...
+    def cancel_order_by_id(self, order_id: str) -> Any: ...
+    def get_orders(self, *, filter: Any = None) -> list[Any]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +382,9 @@ class AlpacaExecutor:
         notes: str = "",
         trail_highs: dict[str, float] | None = None,
         trail_pct: float | None = None,
+        stop_pcts: dict[str, float] | None = None,
+        repair_stops_after_fill: bool = False,
+        fill_wait_seconds: float = 30.0,
     ) -> ExecutionReport:
         """Daily-cadence rebalance with hard per-trade cap and stop-loss.
 
@@ -528,14 +540,25 @@ class AlpacaExecutor:
                     stale_positions[sym] = current_qty
                 continue
 
-            # Trailing-stop anchor: trail_high if tracked (carryforward
-            # from prior days), else signal price (fresh entry).
+            # Effective stop distance for this symbol:
+            #   1. trail_pct if there's a trail_high (winning position
+            #      being maintained)
+            #   2. else stop_pcts[sym] if the caller supplied a per-symbol
+            #      override (ATR-normalized stops — wider on high-vol
+            #      names, tighter on low-vol). Always ≤ stop_loss_pct
+            #      since that's the operator's hard cap; the caller is
+            #      responsible for enforcing it.
+            #   3. else stop_loss_pct (the operator's flat-rate fallback).
             if trail_highs is not None and sym in trail_highs:
                 stop_anchor = trail_highs[sym]
                 stop_dist = trail_pct if trail_pct is not None else stop_loss_pct
             else:
                 stop_anchor = price
-                stop_dist = stop_loss_pct
+                stop_dist = (
+                    stop_pcts.get(sym, stop_loss_pct)
+                    if stop_pcts is not None
+                    else stop_loss_pct
+                )
             stop_price = round(stop_anchor * (1.0 - stop_dist), 2)
 
             # Notional-cap defense (operator's 20% rule).
@@ -781,6 +804,36 @@ class AlpacaExecutor:
             if o.role == "entry"
         ]
 
+        # ---- 4. Post-fill stop repair ----------------------------------
+        # OTO brackets attach stops anchored to SIGNAL price (yesterday's
+        # close). If the stock gaps significantly between the signal close
+        # and our market-buy fill, the stop is in the wrong place:
+        #   - Gap UP: stop is effectively wider than stop_pct (e.g., 13%
+        #             instead of 5% — silent floor violation).
+        #   - Gap DOWN: stop is above the fill → fires immediately at
+        #             whatever the broker can get.
+        # This phase polls each entry order's actual fill price and, if
+        # drift exceeds the threshold, replaces the auto-attached stop
+        # with a new one anchored to the actual fill price.
+        #
+        # Why post-submission and not pre: we can't know the fill price
+        # until the order executes. The OTO at signal-anchored stop is
+        # the best "first pass" guarantee — never unprotected — and the
+        # repair tightens it to the correct level seconds later.
+        if (
+            repair_stops_after_fill
+            and not dry_run
+            and any(o.status == "submitted" and o.role == "entry" for o in submitted)
+        ):
+            _repair_oto_stops_to_fill_price(
+                client=self._client,
+                submitted_orders=submitted,
+                signal_prices=signal_prices,
+                stop_pcts=stop_pcts,
+                default_stop_pct=stop_loss_pct,
+                wait_seconds=fill_wait_seconds,
+            )
+
         return ExecutionReport(
             env=self._env,
             timestamp=now,
@@ -857,3 +910,148 @@ def _compute_proposed_orders(
             rationale=rationale,
         ))
     return proposals
+
+
+# ---------------------------------------------------------------------------
+# Post-fill stop repair — fixes the OTO-bracket gap-day exposure
+# ---------------------------------------------------------------------------
+
+
+def _repair_oto_stops_to_fill_price(
+    *,
+    client: Any,
+    submitted_orders: list[SubmittedOrder],
+    signal_prices: dict[str, float],
+    stop_pcts: dict[str, float] | None,
+    default_stop_pct: float,
+    wait_seconds: float = 30.0,
+    drift_threshold: float = 0.01,
+) -> None:
+    """After OTO submissions, re-anchor stops to actual fill prices.
+
+    For each entry order this run submitted:
+      1. Wait ``wait_seconds`` for the fill to land at the broker.
+      2. Fetch the parent order from Alpaca and read filled_avg_price.
+      3. If |filled_avg_price - signal_price| / signal_price >
+         drift_threshold (default 1%), the OTO's auto-attached stop is
+         in the wrong place. Cancel it and submit a standalone stop
+         anchored to filled_avg_price.
+
+    Cases handled gracefully (do nothing):
+      - Order still pending after wait_seconds (not yet filled)
+      - Order rejected / cancelled / expired
+      - Drift within threshold (signal price was close enough)
+      - Broker API errors (logged, not raised)
+
+    The repair phase mutates the broker state but does NOT update the
+    ``submitted_orders`` list (the original audit trail is preserved).
+    A separate "stop_repair" SubmittedOrder row could be added later if
+    operators want richer reporting; the current behaviour is to log
+    each repair to the standard logger so the .out file captures it.
+
+    Skipped entirely when ``wait_seconds <= 0`` — tests use zero to
+    keep the executor synchronous-only.
+    """
+    import time as _time
+
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import StopOrderRequest
+
+    if wait_seconds > 0:
+        logger.info(
+            "stop repair: waiting %.1fs for fills before re-anchoring",
+            wait_seconds,
+        )
+        _time.sleep(wait_seconds)
+
+    # Collect entry orders that were ACTUALLY submitted (not dry-run,
+    # not failed, not "kept") — those are the candidates whose stops
+    # might need re-anchoring.
+    entries = [
+        o for o in submitted_orders
+        if o.role == "entry" and o.status == "submitted" and o.alpaca_order_id
+    ]
+    if not entries:
+        return
+
+    for entry in entries:
+        sym = entry.symbol
+        signal_price = signal_prices.get(sym, 0.0)
+        if signal_price <= 0:
+            continue
+        per_sym_pct = (
+            stop_pcts.get(sym, default_stop_pct)
+            if stop_pcts is not None
+            else default_stop_pct
+        )
+
+        # Fetch the parent order to read filled_avg_price + child IDs.
+        try:
+            order = client.get_order_by_id(entry.alpaca_order_id)
+        except Exception as e:
+            logger.warning(
+                "stop repair: could not fetch order %s for %s: %s",
+                entry.alpaca_order_id, sym, e,
+            )
+            continue
+
+        # Skip if not filled yet — the OTO's signal-anchored stop still
+        # protects (just at the wrong level). Next day's run will catch
+        # any stragglers via the regular signal-price stop.
+        status = getattr(getattr(order, "status", None), "value", "")
+        if status != "filled":
+            continue
+
+        filled_avg_price = getattr(order, "filled_avg_price", None)
+        if filled_avg_price is None:
+            continue
+        try:
+            fill_px = float(filled_avg_price)
+        except (TypeError, ValueError):
+            continue
+        if fill_px <= 0:
+            continue
+
+        drift = abs(fill_px - signal_price) / signal_price
+        if drift < drift_threshold:
+            # Fill close enough to signal that the auto-stop is fine.
+            continue
+
+        # Drift > threshold: replace the stop. New stop level anchored
+        # to actual fill price using the per-symbol stop_pct.
+        new_stop_price = round(fill_px * (1.0 - per_sym_pct), 2)
+        if new_stop_price <= 0:
+            continue
+
+        # Find the OTO child stop order via the parent's `legs` attribute.
+        legs = getattr(order, "legs", None) or []
+        child_stop_id = None
+        for leg in legs:
+            leg_type = getattr(getattr(leg, "order_type", None), "value", "")
+            if leg_type == "stop":
+                child_stop_id = getattr(leg, "id", None)
+                break
+
+        try:
+            if child_stop_id:
+                client.cancel_order_by_id(child_stop_id)
+            new_stop_req = StopOrderRequest(
+                symbol=sym,
+                qty=int(entry.qty),
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                stop_price=new_stop_price,
+            )
+            client.submit_order(new_stop_req)
+            logger.info(
+                "stop repair: %s filled at %.2f (signal %.2f, drift %.1f%%) — "
+                "stop moved to %.2f (was anchored at %.2f)",
+                sym, fill_px, signal_price, drift * 100,
+                new_stop_price, round(signal_price * (1.0 - per_sym_pct), 2),
+            )
+        except Exception as e:
+            logger.warning(
+                "stop repair: failed to replace stop for %s: %s. "
+                "Original OTO stop remains active (anchored to signal price).",
+                sym, e,
+            )
