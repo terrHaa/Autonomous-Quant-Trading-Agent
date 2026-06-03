@@ -53,7 +53,13 @@ risk:
   max_net_exposure: 1.0
 
   # Per-name position cap as a fraction of equity. Prevents single-name blowups.
-  max_position_weight: 0.05
+  # 0.20 = 20%. This is concentrated-bet territory (institutional norm is
+  # 3-5%); the operator deliberately accepts the higher single-stock risk
+  # in exchange for letting HRP put real size on high-conviction names.
+  # If you tighten this, also update MAX_POSITION_WEIGHT in
+  # src/quant/agent/daily_runner.py — the analyst's monthly self-audit
+  # will flag any drift between the two.
+  max_position_weight: 0.20
 
   # Drawdown kill switch: if peak-to-trough equity drawdown exceeds this,
   # the risk overlay flattens all positions and pauses trading.

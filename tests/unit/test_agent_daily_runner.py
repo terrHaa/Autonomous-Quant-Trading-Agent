@@ -536,11 +536,11 @@ def test_run_daily_trade_passes_operator_constants_to_executor(tmp_path: Path, _
         dry_run=True,
     )
     assert executor.last_call["stop_loss_pct"] == daily_runner.STOP_LOSS_PCT == 0.05
-    # Operator's per-trade cap: 5% (matches configs/default.yaml).
-    # If you tighten/loosen this, also bump configs/default.yaml's
-    # risk.max_position_weight to match (the analyst's monthly self-audit
-    # will flag the drift if you forget).
-    assert executor.last_call["max_position_weight"] == daily_runner.MAX_POSITION_WEIGHT == 0.05
+    # Operator's per-trade cap: 20%. Concentrated-bet policy. MUST match
+    # configs/default.yaml's risk.max_position_weight. The analyst's
+    # monthly self-audit flags any drift between the two; this test is
+    # the build-time regression guard for the same invariant.
+    assert executor.last_call["max_position_weight"] == daily_runner.MAX_POSITION_WEIGHT == 0.20
 
 
 def test_run_daily_trade_includes_held_names_in_signal_prices(tmp_path: Path, _in_trade_window) -> None:

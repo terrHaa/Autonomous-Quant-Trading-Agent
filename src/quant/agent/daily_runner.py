@@ -67,11 +67,17 @@ logger = logging.getLogger(__name__)
 # two and surfaces any drift as a critical finding. If you change one,
 # change both.
 STOP_LOSS_PCT = 0.05            # 5% stop on every entry
-MAX_POSITION_WEIGHT = 0.05      # 5% per-trade cap (was 20%; tightened to
-                                # match configs/default.yaml's risk
-                                # block. At 20% a single -25% gap on one
-                                # name = -5% portfolio drawdown, which
-                                # no institutional shop accepts.)
+MAX_POSITION_WEIGHT = 0.20      # 20% per-trade cap — operator policy.
+                                # This is concentrated-bet territory
+                                # (institutional norm is 3-5%), but the
+                                # operator wants the option for HRP to
+                                # put real size on high-conviction names
+                                # when all three strategies agree. The
+                                # accompanying configs/default.yaml
+                                # `risk.max_position_weight` is set to
+                                # 0.20 to match — the analyst's monthly
+                                # pipeline self-audit will scream if
+                                # these ever drift apart again.
 # Drawdown kill switch threshold. If equity is more than this far below
 # its running peak (across the persisted daily-run history), the daily
 # trade routine refuses to open NEW entries. Existing positions retain
