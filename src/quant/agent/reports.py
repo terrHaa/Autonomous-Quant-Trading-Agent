@@ -34,9 +34,14 @@ def render_daily_report(
 
     The subject is short (~70 chars max so it doesn't wrap in inbox lists).
     """
+    # Count both NEW entries (status=submitted in OTO bracket) AND KEPT
+    # entries (carryforward positions where only the stop was re-armed).
+    # Both represent positions that are now ON THE BOOKS — the subject
+    # line should reflect total active positions, not just new ones.
     n_entries = sum(
         1 for o in execution_report.submitted_orders
-        if o.role == "entry" and o.status in ("submitted", "skipped_dry_run")
+        if o.role == "entry"
+        and o.status in ("submitted", "skipped_dry_run", "kept")
     )
     n_stops = sum(
         1 for o in execution_report.submitted_orders
@@ -150,7 +155,10 @@ def render_weekly_report(
         lines.append(f"**P&L this week:** ${pnl:+,.2f} ({ret_pct:+.2%})  ")
     lines.append("")
 
-    # Aggregate stats from the daily runs.
+    # Aggregate stats from the daily runs. Count only NEW broker entries
+    # ("submitted") — "kept" rows are carryforward and don't represent
+    # new trading activity. This number is "how many new entries did
+    # the system make this week", which is the operator-facing metric.
     n_entries = sum(
         1
         for run in daily_runs

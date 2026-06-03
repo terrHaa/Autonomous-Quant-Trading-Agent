@@ -65,7 +65,17 @@ class SubmittedOrder:
     symbol: str
     side: Literal["buy", "sell"]
     qty: int
-    status: Literal["submitted", "failed", "skipped_dry_run"]
+    # 'status' values:
+    #   submitted       — order went to the broker successfully
+    #   failed          — broker rejected (or local guard refused)
+    #   skipped_dry_run — dry_run=True; no broker contact
+    #   kept            — position carried forward from yesterday at the
+    #                     SAME qty. NO buy was placed at the broker; only
+    #                     a fresh standalone stop. The "kept" entry row
+    #                     exists so the daily report can render carried-
+    #                     forward positions and the audit's qty cross-
+    #                     check still passes.
+    status: Literal["submitted", "failed", "skipped_dry_run", "kept"]
     alpaca_order_id: str | None = None
     # 'role' tells reports the difference between the entry order and
     # its protective stop-loss child. ``"entry"`` is the default for
@@ -469,35 +479,125 @@ class AlpacaExecutor:
                     error=f"cancel_orders failed: {e}",
                 ))
 
-        # ---- 2. Close positions not in the target book. -------------
-        # Done as PROPOSED orders so they show on the report alongside
-        # entries; dry_run skips submission as elsewhere.
+        # ---- 2. PLAN the day's actions, signal-driven ---------------
+        # For each in-target symbol, decide one of four outcomes:
+        #   - "kept":    target_qty == current_qty > 0 → no buy, no sell;
+        #                just re-arm a standalone GTC stop at the new
+        #                (possibly higher) trail level. Saves the spread
+        #                round-trip the old close-and-reopen incurred.
+        #   - "resize":  current > 0 but target_qty differs → close
+        #                current, then re-open at new size via OTO bracket.
+        #   - "new":     current == 0 → fresh OTO bracket entry.
+        #   - "exit":    trail-anchored stop would fire immediately
+        #                (stop_price >= signal_price) → close, don't
+        #                re-enter today. Trail logic is saying "we should
+        #                already be out".
+        #   - "refused": notional cap violated (defense-in-depth on the
+        #                20% rule) → emit a failure row, do nothing.
+        # Plus: every held name NOT in target_symbols → close-out.
+        #
+        # The CRITICAL invariant this enforces: NEVER buy and sell the
+        # same name in the same run when the position is unchanged. The
+        # old "close-and-reopen-always" cost ~50 wash trades/day in
+        # steady state — fine on zero-commission paper, real money on a
+        # live account. Test
+        # `test_unchanged_position_makes_no_buy_and_no_sell` is the
+        # explicit regression guard.
         target_symbols = {s for s, w in target_weights.items() if w > 0}
-        stale_positions = {
+        stale_positions: dict[str, int] = {
             sym: qty for sym, qty in positions.items()
             if sym not in target_symbols and qty != 0
         }
-        # We ALSO close every in-target position with current_qty > 0,
-        # regardless of whether target_qty matches current_qty.
-        #
-        # Why unconditional: step 1 cancelled yesterday's GTC stop on every
-        # held name. Step 3 unconditionally submits a fresh OTO bracket
-        # (buy + stop child) for every target. If we skipped the close
-        # here when qty happened to match, step 3's buy would DOUBLE the
-        # position — broker has 50 shares, we buy 50 more, end up at 100,
-        # with a stop covering only the latest 50. The close-and-reopen
-        # invariant in the comment above (step 3) depends on this loop
-        # placing every in-target name into stale_positions.
-        #
-        # Cost: ~52 unnecessary orders per day in steady state (each
-        # name's sell + re-buy when target_qty equals current_qty).
-        # At zero commissions on paper this is just slippage — measured
-        # at a few dollars per day on $100k for the current 26-name
-        # ensemble — and it preserves the simple, correct invariant.
-        for sym in target_symbols:
+        # plans[sym] is consumed in step 3. Three relevant fields:
+        #   action: "kept" | "resize" | "new" | "exit" | "refused"
+        #   target_qty, stop_price, signal_price
+        # For "refused" the error field is also set.
+        plans: dict[str, dict] = {}
+
+        for sym in sorted(target_symbols):
+            weight = target_weights[sym]
+            price = signal_prices.get(sym)
+            if price is None or price <= 0:
+                continue
+            target_qty = int(weight * equity / price)
             current_qty = positions.get(sym, 0)
+            if target_qty <= 0:
+                # 0 target after rounding (e.g. tiny weight on a high-price
+                # name). If we hold it, close out; otherwise nothing.
+                if current_qty > 0:
+                    stale_positions[sym] = current_qty
+                continue
+
+            # Trailing-stop anchor: trail_high if tracked (carryforward
+            # from prior days), else signal price (fresh entry).
+            if trail_highs is not None and sym in trail_highs:
+                stop_anchor = trail_highs[sym]
+                stop_dist = trail_pct if trail_pct is not None else stop_loss_pct
+            else:
+                stop_anchor = price
+                stop_dist = stop_loss_pct
+            stop_price = round(stop_anchor * (1.0 - stop_dist), 2)
+
+            # Notional-cap defense (operator's 20% rule).
+            entry_notional = target_qty * price
+            if entry_notional > max_notional:
+                plans[sym] = {
+                    "action": "refused",
+                    "target_qty": target_qty,
+                    "stop_price": stop_price,
+                    "signal_price": price,
+                    "error": (
+                        f"refusing entry: notional ${entry_notional:,.2f} "
+                        f"exceeds max_position_weight × equity = "
+                        f"${max_notional:,.2f}"
+                    ),
+                }
+                # If we currently hold it, also close (don't maintain).
+                if current_qty > 0:
+                    stale_positions[sym] = current_qty
+                continue
+
+            # Forced exit: trail-stop would fire immediately. Close existing
+            # position if any; don't re-enter.
+            if stop_price >= price:
+                plans[sym] = {
+                    "action": "exit",
+                    "target_qty": target_qty,
+                    "stop_price": stop_price,
+                    "signal_price": price,
+                }
+                if current_qty > 0:
+                    stale_positions[sym] = current_qty
+                continue
+
+            # Kept: same qty as currently held → just re-arm the stop.
+            if current_qty == target_qty:
+                plans[sym] = {
+                    "action": "kept",
+                    "target_qty": target_qty,
+                    "stop_price": stop_price,
+                    "signal_price": price,
+                }
+                continue
+
+            # Resize: held but at wrong qty → close + reopen.
             if current_qty > 0:
                 stale_positions[sym] = current_qty
+                plans[sym] = {
+                    "action": "resize",
+                    "target_qty": target_qty,
+                    "stop_price": stop_price,
+                    "signal_price": price,
+                }
+                continue
+
+            # New entry: not held → OTO bracket.
+            plans[sym] = {
+                "action": "new",
+                "target_qty": target_qty,
+                "stop_price": stop_price,
+                "signal_price": price,
+            }
 
         for sym, qty in sorted(stale_positions.items()):
             if dry_run:
@@ -530,67 +630,89 @@ class AlpacaExecutor:
                     error=str(e),
                 ))
 
-        # ---- 3. Open new target positions with OTO + protective stop. ----
-        # For each target symbol whose current qty doesn't already match,
-        # we submitted a close above. Now we (re-)enter via OTO:
-        #   parent: market buy `target_qty` shares
-        #   child:  stop-loss sell `target_qty` shares at signal*(1-pct)
-        # Alpaca makes the child active only after the parent fills.
-        for sym in sorted(target_symbols):
-            weight = target_weights[sym]
-            price = signal_prices.get(sym)
-            if price is None or price <= 0:
-                continue
+        # ---- 3. Execute the plan: OTO for new/resize, standalone stop for kept.
+        for sym in sorted(plans):
+            p = plans[sym]
+            action = p["action"]
 
-            target_qty = int(weight * equity / price)
-            current_qty = positions.get(sym, 0)
-            if target_qty <= 0:
-                continue
-            # If current == target after the (potential) close above,
-            # no order needed. But: we cancelled the old stop in step 1,
-            # so a position-unchanged name now has no stop. We need to
-            # re-establish it. Simplest: close-and-reopen always.
-            # (Already handled above — sym is in stale_positions if
-            # current != 0.)
-
-            entry_notional = target_qty * price
-            if entry_notional > max_notional:
+            # --- Refused: notional cap blocked the entry. Emit a failure row.
+            if action == "refused":
                 submitted.append(SubmittedOrder(
-                    symbol=sym, side="buy", qty=target_qty,
+                    symbol=sym, side="buy", qty=p["target_qty"],
+                    status="failed", role="entry",
+                    error=p["error"],
+                ))
+                continue
+
+            # --- Forced exit: position was already added to stale_positions
+            # and sold above. Emit an entry row marked as exit for audit clarity.
+            if action == "exit":
+                submitted.append(SubmittedOrder(
+                    symbol=sym, side="buy", qty=p["target_qty"],
                     status="failed", role="entry",
                     error=(
-                        f"refusing entry: notional ${entry_notional:,.2f} "
-                        f"exceeds max_position_weight × equity = "
-                        f"${max_notional:,.2f}"
+                        f"trail-anchored stop {p['stop_price']} >= signal "
+                        f"{p['signal_price']} — closed without re-entry"
                     ),
                 ))
                 continue
 
-            # Trailing-stop ratchet: if caller supplied a trail_high for
-            # this name, anchor the stop to it (will be >= signal_price)
-            # and use trail_pct (if supplied) for the distance — typically
-            # tighter than stop_loss_pct. Otherwise anchor to the signal
-            # price and use stop_loss_pct (legacy entry-stop semantics).
-            if trail_highs is not None and sym in trail_highs:
-                stop_anchor = trail_highs[sym]
-                stop_dist = trail_pct if trail_pct is not None else stop_loss_pct
-            else:
-                stop_anchor = price
-                stop_dist = stop_loss_pct
-            stop_price = round(stop_anchor * (1.0 - stop_dist), 2)
-            # If for any reason stop_price >= entry signal price, refuse.
-            # (Can happen if trail_high * (1 - pct) > current signal_price,
-            # i.e. the stock has fallen so much that the trailing stop
-            # would fire immediately. Better to skip the re-entry than
-            # to buy-then-immediately-stop-out.)
-            if stop_price >= price:
-                submitted.append(SubmittedOrder(
-                    symbol=sym, side="buy", qty=target_qty,
-                    status="failed", role="entry",
-                    error=f"computed stop_price {stop_price} >= signal {price}",
-                ))
+            target_qty = p["target_qty"]
+            stop_price = p["stop_price"]
+
+            # --- Kept: no buy, no sell. Re-arm a standalone GTC stop at the
+            # (possibly higher) trail level. This is THE optimization — it
+            # replaces the old close-and-reopen wash trade with a single
+            # stop-refresh order. Emits a "kept" status entry row so the
+            # daily report shows the position carried forward and the audit's
+            # qty cross-check still passes.
+            if action == "kept":
+                if dry_run:
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="buy", qty=target_qty,
+                        status="kept", role="entry",
+                    ))
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="sell", qty=target_qty,
+                        status="skipped_dry_run", role="stop_loss",
+                        stop_price=stop_price,
+                    ))
+                    continue
+                try:
+                    from alpaca.trading.enums import OrderSide, TimeInForce
+                    from alpaca.trading.requests import StopOrderRequest
+
+                    req = StopOrderRequest(
+                        symbol=sym,
+                        qty=target_qty,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        stop_price=stop_price,
+                    )
+                    resp = self._client.submit_order(req)
+                    # No buy row: the position was not touched. Emit a
+                    # "kept" audit row so the daily report can render
+                    # carried-forward positions and the audit's qty
+                    # cross-check (run_qty vs broker pos_qty) still works.
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="buy", qty=target_qty,
+                        status="kept", role="entry",
+                    ))
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="sell", qty=target_qty,
+                        status="submitted", role="stop_loss",
+                        stop_price=stop_price,
+                        alpaca_order_id=str(getattr(resp, "id", None)),
+                    ))
+                except Exception as e:
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="sell", qty=target_qty,
+                        status="failed", role="stop_loss",
+                        stop_price=stop_price, error=str(e),
+                    ))
                 continue
 
+            # --- New entry OR resize: full OTO bracket (existing path).
             if dry_run:
                 submitted.append(SubmittedOrder(
                     symbol=sym, side="buy", qty=target_qty,

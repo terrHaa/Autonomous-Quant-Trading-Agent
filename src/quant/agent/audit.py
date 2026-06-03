@@ -187,12 +187,16 @@ def _check_broker_reconciliation(
                 f"{o.symbol}: stop_qty={o.qty} != pos_qty={positions[o.symbol]}"
             )
 
-    # Cross-reference with the run record — submitted entries should match
-    # current positions (one trading day later, before next rebalance fires).
+    # Cross-reference with the run record — submitted/kept entries should
+    # match current positions (one trading day later, before next rebalance
+    # fires). "kept" entries are carryforward (no broker trade) but the qty
+    # reflects what should still be held; include them in run_qty.
+    # FAILED entries (refused / forced exit) are skipped: their qty is the
+    # would-be target that we deliberately did NOT submit.
     payload = load_daily_run(for_date, runs_dir=runs_dir) or {}
     run_qty: dict[str, int] = {}
     for o in payload.get("execution_report", {}).get("submitted_orders", []):
-        if o.get("role") == "entry":
+        if o.get("role") == "entry" and o.get("status") in ("submitted", "kept"):
             run_qty[o["symbol"]] = int(o.get("qty", 0))
     # If a name in run_qty has a different broker qty, EITHER the entry only
     # partially filled OR a stop has triggered overnight. We don't fail the

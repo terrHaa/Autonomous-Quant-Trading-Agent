@@ -423,7 +423,9 @@ def test_daily_rebalance_uses_trail_highs_for_stop_anchor() -> None:
     )
     failed = [o for o in report.submitted_orders if o.status == "failed"]
     assert len(failed) >= 1
-    assert "stop_price" in failed[0].error
+    # New refusal message phrasing: mentions "trail-anchored stop ... >= signal"
+    assert "trail-anchored stop" in failed[0].error
+    assert ">= signal" in failed[0].error
 
 
 def test_daily_rebalance_trail_high_below_signal_uses_it() -> None:
@@ -547,36 +549,147 @@ def test_daily_rebalance_trail_highs_only_applies_when_sym_present() -> None:
     assert msft_stop == 380.0             # 400 * 0.95
 
 
-def test_daily_rebalance_closes_held_target_even_when_qty_unchanged() -> None:
-    """Held position with target_qty == current_qty MUST still be closed-and-reopened.
+def test_unchanged_position_makes_no_buy_and_no_sell() -> None:
+    """CRITICAL REGRESSION GUARD: an in-target position with target_qty ==
+    current_qty must NOT trigger any buy or sell — only a standalone GTC
+    stop re-arm.
 
-    Step 1 cancels yesterday's GTC stops, so any in-target position needs
-    a fresh stop attached via the OTO bracket. If we skipped the close
-    when qty matched, step 3's unconditional buy would DOUBLE the position
-    (broker has 50; step 3 buys 50 more → 100). This test pins down the
-    correct close-and-reopen invariant.
+    If this test ever breaks because someone adds an unconditional close
+    or unconditional buy in submit_daily_rebalance, the result is wash
+    trading on every unchanged position — paying the bid-ask spread
+    twice per day on every name we're already holding correctly. On
+    a real-capital account that's a meaningful return drag.
+
+    Failure modes this catches:
+      - the original close-and-reopen-always design (sell + buy + stop)
+      - the doubling bug fixed in commit 07a92a0 (no close + unconditional buy)
+      - any future "let's just re-cancel and re-open everything" shortcut
+
+    The correct flow for an unchanged position is exactly ONE order:
+    a standalone GTC stop at the (possibly higher) trail level. No buy
+    at the broker, no sell at the broker.
     """
     # Equity 100k, weight 0.10, price $200 → target_qty = 50.
-    # Current_qty also 50 → bug case.
+    # Current_qty also 50 → "kept" case.
     client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
     exec_ = AlpacaExecutor(trading_client=client)
     report = exec_.submit_daily_rebalance(
         target_weights={"AAPL": 0.10},
         signal_prices={"AAPL": 200.0},
         stop_loss_pct=0.05,
+    )
+
+    # --- Hard invariants ---
+    real_submissions = [
+        o for o in report.submitted_orders if o.status == "submitted"
+    ]
+    # Exactly ONE real broker order: the standalone stop.
+    assert len(real_submissions) == 1, (
+        f"unchanged position should submit exactly 1 order (the stop); "
+        f"got {len(real_submissions)}: {real_submissions}"
+    )
+    assert real_submissions[0].role == "stop_loss"
+    assert real_submissions[0].side == "sell"
+    assert real_submissions[0].qty == 50
+
+    # NO sells of AAPL at the broker (would be a wash trade).
+    aapl_sells = [
+        o for o in real_submissions
+        if o.symbol == "AAPL" and o.side == "sell" and o.role == "entry"
+    ]
+    assert aapl_sells == [], (
+        f"WASH TRADE REGRESSION: unchanged AAPL position generated a "
+        f"sell order: {aapl_sells}. This is exactly what the signal-driven "
+        "rebalance refactor exists to prevent."
+    )
+
+    # NO buys of AAPL at the broker either.
+    aapl_buys = [
+        o for o in real_submissions
+        if o.symbol == "AAPL" and o.side == "buy"
+    ]
+    assert aapl_buys == [], (
+        f"WASH TRADE REGRESSION: unchanged AAPL position generated a "
+        f"buy order: {aapl_buys}."
+    )
+
+    # The audit-trail row still shows the position carried forward, with
+    # status="kept", so the daily report and audit qty-checks still work.
+    kept_rows = [o for o in report.submitted_orders if o.status == "kept"]
+    assert len(kept_rows) == 1
+    assert kept_rows[0].symbol == "AAPL"
+    assert kept_rows[0].qty == 50
+
+
+def test_resized_position_does_close_and_reopen() -> None:
+    """Held position with target_qty != current_qty SHOULD close + re-open.
+
+    Counterpart to the "no wash trade" test: when qty actually needs to
+    change, the close-and-reopen path still fires (sell, then OTO).
+    """
+    # Equity 100k, weight 0.20, price $200 → target_qty = 100.
+    # Current_qty 50 → resize case.
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.20},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
         dry_run=True,
     )
-    # We expect: 1 sell (close), 1 buy (re-open with bracket), 1 stop_loss audit row.
     by_role = {}
     for o in report.submitted_orders:
         by_role.setdefault((o.role, o.side), []).append(o)
-    # The close-out sell goes through the bare-entry path with role='entry'.
-    assert ("entry", "sell") in by_role, (
-        f"expected a sell row for the close; got roles: {sorted(by_role)}"
-    )
+    # Close-out sell of the existing 50.
     assert by_role[("entry", "sell")][0].qty == 50
-    # The re-entry buy + stop_loss audit row.
-    assert ("entry", "buy") in by_role
-    assert by_role[("entry", "buy")][0].qty == 50
-    assert ("stop_loss", "sell") in by_role
-    assert by_role[("stop_loss", "sell")][0].qty == 50
+    # New OTO bracket buy of 100.
+    assert by_role[("entry", "buy")][0].qty == 100
+    # New stop on the 100 shares.
+    assert by_role[("stop_loss", "sell")][0].qty == 100
+
+
+def test_dropped_from_targets_flattens_position() -> None:
+    """A name held yesterday but absent from today's target_weights is
+    flatted — sell to 0, no re-open."""
+    client = _FakeTradingClient(equity=100_000, positions={"OLDPOS": 30})
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0, "OLDPOS": 50.0},
+        stop_loss_pct=0.05,
+    )
+    real = [o for o in report.submitted_orders if o.status == "submitted"]
+    # OLDPOS sell-to-flat + AAPL OTO bracket entry + AAPL stop child = 3.
+    syms_sold = [o.symbol for o in real if o.side == "sell" and o.role == "entry"]
+    assert syms_sold == ["OLDPOS"]
+
+
+def test_forced_exit_when_trail_stop_above_signal() -> None:
+    """If the trail-anchored stop would fire immediately (stock has
+    retraced past the trail level), close the position and DON'T re-enter.
+
+    Example: AAPL was held with trail_high=$250. Today signal is $200,
+    trail_pct=0.05 → stop would be $237.50. Stop above signal means stop
+    would fire on entry. Correct behavior: sell, no re-buy.
+    """
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 250.0},
+    )
+    real = [o for o in report.submitted_orders if o.status == "submitted"]
+    # Exactly one real submission: the sell-to-flat.
+    assert len(real) == 1
+    assert real[0].side == "sell" and real[0].role == "entry"
+    assert real[0].symbol == "AAPL"
+    # The "buy" row exists but as a failed/refused audit entry, not a
+    # real broker submission.
+    refused = [
+        o for o in report.submitted_orders
+        if o.status == "failed" and o.symbol == "AAPL" and o.side == "buy"
+    ]
+    assert len(refused) == 1
+    assert "stop" in refused[0].error.lower()
