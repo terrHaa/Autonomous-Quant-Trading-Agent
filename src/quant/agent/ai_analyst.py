@@ -27,7 +27,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -90,7 +90,16 @@ Return a single JSON object with this exact shape:
   "proposed_state_changes": {
     "trail_pct": <float in (0, 0.05] | null>,
     "reasoning": "<quantitative evidence per ANALYST.md §6.5 — cite specific symbols, give-back magnitudes, or whipsaw counts from the daily runs table. Vague intuition is NOT acceptable.>"
-  } | null
+  } | null,
+  "pipeline_findings": [
+    {
+      "severity": "critical" | "high" | "medium" | "low",
+      "category": "drift" | "dead_code" | "missing_safeguard" | "industry_norm",
+      "description": "<1-2 sentences: what's wrong, with the specific numbers>",
+      "recommendation": "<1-2 sentences: what to do about it>"
+    },
+    ...
+  ]
 }
 
 ALL of the following are acceptable structures:
@@ -98,11 +107,15 @@ ALL of the following are acceptable structures:
   - Strategy proposal only               (proposed_state_changes: null)
   - State change only                    (proposed_strategy: null)
   - Analysis only                        (both null — per ANALYST.md §7)
+  - pipeline_findings: ALWAYS present (empty list if nothing found)
 
-Use `proposed_state_changes` for tuning the trailing-stop distance.
 Use `proposed_strategy` for proposing a NEW strategy class.
+Use `proposed_state_changes` for tuning the trailing-stop distance.
+Use `pipeline_findings` for INFRASTRUCTURE issues you spotted in the
+  monthly self-audit (config drift, dead code, missing safeguards,
+  thresholds below institutional norms). See ANALYST.md §6 step 5c.
 Use `analysis` text for everything else (qualitative commentary,
-regime observations, ensemble-mix opinions, etc.).
+  regime observations, ensemble-mix opinions, etc.).
 """
 
 
@@ -189,11 +202,33 @@ class StateChangeProposal:
 
 
 @dataclass
+class PipelineFinding:
+    """A pipeline-quality issue the analyst spotted in the monthly self-audit.
+
+    These are NOT strategy ideas. They are infrastructure/risk-config
+    findings — drift between hardcoded constants and config values, dead
+    risk-management features, missing institutional safeguards, etc.
+
+    The monthly review surfaces them in a dedicated section of the email
+    with the severity tag prominent. The operator decides whether/how to
+    apply each fix. No auto-apply for these — pipeline changes touch
+    safety-critical code and need human review.
+    """
+    severity: str             # "critical" | "high" | "medium" | "low"
+    category: str             # "drift" | "dead_code" | "missing_safeguard" | "industry_norm"
+    description: str          # 1-2 sentences: what's wrong
+    recommendation: str       # 1-2 sentences: what to do about it
+
+
+@dataclass
 class AnalysisReport:
     """Full output of one AI analyst call."""
     analysis: str                         # qualitative narrative
     proposed_strategy: StrategyProposal | None  # None if no proposal
     proposed_state_changes: StateChangeProposal | None = None  # None if no tuning
+    # Infrastructure/risk-config findings from the pipeline self-audit
+    # (ANALYST.md §6 step 5c). Empty list when the analyst flagged nothing.
+    pipeline_findings: list[PipelineFinding] = field(default_factory=list)
 
 
 @dataclass
@@ -289,6 +324,7 @@ def _build_user_message(
     ai_strategy_names: list[str],
     recent_weekly_reports: list[dict[str, Any]] | None = None,
     monthly_metrics: dict[str, Any] | None = None,
+    pipeline_snapshot: dict[str, Any] | None = None,
 ) -> str:
     """Compose the full user-turn message for the analyst call."""
     runs_table = _summarise_runs(daily_runs)
@@ -332,6 +368,32 @@ def _build_user_message(
     else:
         metrics_section = ""
 
+    # Pipeline snapshot — hardcoded constants + config values + wiring
+    # status, bundled by monthly_review._build_pipeline_snapshot(). The
+    # analyst must compare these against each other AND against the
+    # industry norms (also in the snapshot) and emit findings under
+    # `pipeline_findings`. See ANALYST.md §6 step 5c.
+    if pipeline_snapshot:
+        pipeline_section = (
+            "## Pipeline Self-Audit — hardcoded knobs, config values, and "
+            "wiring status (see ANALYST.md §6 step 5c)\n\n"
+            "**You MUST review this block** and emit `pipeline_findings` "
+            "for anything wrong. Specifically:\n"
+            "  - Compare `operator_hard_rules_in_code` vs `config_yaml_values` "
+            "    for the SAME risk knob. Any mismatch is a drift finding "
+            "    (severity: high or critical).\n"
+            "  - Check `wiring_status` for advertised-but-not-wired features. "
+            "    A False there is dead code (severity: high).\n"
+            "  - Compare `sandbox_gates_in_code` to "
+            "    `industry_norms_for_comparison`. Anything looser than "
+            "    institutional norms is a finding (severity: medium-high).\n"
+            "  - If nothing is wrong, emit `pipeline_findings: []`. Don't "
+            "    invent findings to look productive.\n\n"
+            f"```json\n{json.dumps(pipeline_snapshot, indent=2, default=str)}\n```\n\n"
+        )
+    else:
+        pipeline_section = ""
+
     return (
         f"## Trading Results — last {len(daily_runs)} trading day(s) "
         "(daily-grain table; spot-check specific days here)\n\n"
@@ -341,6 +403,7 @@ def _build_user_message(
         f"## AI-Generated Strategies Already Active\n\n{active_ai}\n\n"
         f"## Monthly Grid-Search Results\n\n{grid_search_summary}\n\n"
         f"{weekly_section}"
+        f"{pipeline_section}"
         "---\nPlease analyze the results and propose a new strategy if appropriate. "
         "TRIANGULATE three sources before any proposal: (1) weekly narratives — "
         "curated attribution, (2) raw daily table — granular events, "
@@ -349,7 +412,9 @@ def _build_user_message(
         "monthly day-of-week breakdown shows Monday underperformance is the "
         "real story), explicitly note the disagreement — that's a high-signal "
         f"finding. If weekly reports flagged anything '{ESCALATION_MARKER}', "
-        "address those explicitly in your analysis and proposal decisions."
+        "address those explicitly in your analysis and proposal decisions. "
+        "FINALLY: complete the pipeline self-audit and emit `pipeline_findings` "
+        "for any infrastructure issues you spotted."
     )
 
 
@@ -412,6 +477,7 @@ class AIAnalyst:
         grid_search_summary: str = "Grid search was not run this month.",
         recent_weekly_reports: list[dict[str, Any]] | None = None,
         monthly_metrics: dict[str, Any] | None = None,
+        pipeline_snapshot: dict[str, Any] | None = None,
     ) -> AnalysisReport:
         """Call Claude to analyze results and optionally propose a new strategy.
 
@@ -446,6 +512,7 @@ class AIAnalyst:
             ai_strategy_names or [],
             recent_weekly_reports=recent_weekly_reports,
             monthly_metrics=monthly_metrics,
+            pipeline_snapshot=pipeline_snapshot,
         )
         logger.info(
             "ai_analyst: calling %s with %d daily runs", self._model, len(daily_runs)
@@ -502,10 +569,33 @@ class AIAnalyst:
                     e,
                 )
 
+        # Parse pipeline self-audit findings — list of {severity, category,
+        # description, recommendation}. Empty list is the common "all clear"
+        # case. Malformed entries are dropped with a warning.
+        findings_raw = data.get("pipeline_findings") or []
+        findings: list[PipelineFinding] = []
+        if isinstance(findings_raw, list):
+            for entry in findings_raw:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    findings.append(PipelineFinding(
+                        severity=str(entry.get("severity", "low")),
+                        category=str(entry.get("category", "other")),
+                        description=str(entry.get("description", "")),
+                        recommendation=str(entry.get("recommendation", "")),
+                    ))
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "ai_analyst: pipeline_findings entry parse error: %s — skipping",
+                        e,
+                    )
+
         return AnalysisReport(
             analysis=analysis_text,
             proposed_strategy=proposal,
             proposed_state_changes=state_change,
+            pipeline_findings=findings,
         )
 
     def analyze_weekly(

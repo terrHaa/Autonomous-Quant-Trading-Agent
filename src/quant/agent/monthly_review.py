@@ -72,6 +72,92 @@ logger = logging.getLogger(__name__)
 IMPROVER_BACKTEST_YEARS = 2
 
 
+def _build_pipeline_snapshot(config: Config) -> dict:
+    """Bundle every hardcoded knob + config value the AI analyst should
+    cross-check each month.
+
+    Why this exists: the analyst is great at proposing strategies from
+    daily data, but it CANNOT see the codebase. So when a hardcoded
+    constant drifts from the config (e.g., MAX_POSITION_WEIGHT was 20%
+    in code but 5% in config for many commits — a real bug we just
+    found), the analyst has no way to notice. This snapshot exposes
+    the knobs as data so the analyst's pipeline self-audit (per
+    ANALYST.md §6 step 5c) can flag the drift.
+
+    Includes:
+      - All operator hard-rule constants (from daily_runner.py)
+      - All sandbox gate thresholds (from strategy_sandbox.py)
+      - The relevant config.yaml risk + cost values
+      - Whether known risk features are actively wired ("dead code"
+        detection: if the kill switch is configured but never called,
+        we want the analyst to surface that).
+
+    The analyst is instructed to compare these against industry norms
+    AND against each other (drift detection), and to emit findings
+    via `proposed_state_changes.pipeline_findings`.
+    """
+    from quant.agent.daily_runner import (
+        MAX_DRAWDOWN_KILL,
+        MAX_POSITION_WEIGHT,
+        STOP_LOSS_PCT,
+    )
+    from quant.agent.strategy_sandbox import (
+        _BACKTEST_TIMEOUT_SECONDS,
+        _DSR_THRESHOLD,
+        _MAX_DRAWDOWN_ABS,
+        _MIN_SHARPE,
+    )
+    return {
+        "operator_hard_rules_in_code": {
+            "STOP_LOSS_PCT": STOP_LOSS_PCT,
+            "MAX_POSITION_WEIGHT": MAX_POSITION_WEIGHT,
+            "MAX_DRAWDOWN_KILL": MAX_DRAWDOWN_KILL,
+            "_source": "src/quant/agent/daily_runner.py",
+        },
+        "sandbox_gates_in_code": {
+            "min_sharpe": _MIN_SHARPE,
+            "max_drawdown_abs": _MAX_DRAWDOWN_ABS,
+            "dsr_threshold": _DSR_THRESHOLD,
+            "backtest_timeout_seconds": _BACKTEST_TIMEOUT_SECONDS,
+            "_source": "src/quant/agent/strategy_sandbox.py",
+        },
+        "config_yaml_values": {
+            "risk_max_position_weight": config.risk.max_position_weight,
+            "risk_max_drawdown_kill": config.risk.max_drawdown_kill,
+            "risk_vol_target_annual": config.risk.vol_target_annual,
+            "risk_max_gross_leverage": config.risk.max_gross_leverage,
+            "risk_max_net_exposure": config.risk.max_net_exposure,
+            "backtest_costs_spread_bps": config.backtest.costs.spread_bps,
+            "backtest_costs_slippage_bps": config.backtest.costs.slippage_bps,
+            "backtest_costs_commission_bps": config.backtest.costs.commission_bps,
+            "universe_min_avg_dollar_volume_20d": config.universe.min_avg_dollar_volume_20d,
+            "universe_min_price": config.universe.min_price,
+            "_source": "configs/default.yaml",
+        },
+        "wiring_status": {
+            "drawdown_kill_switch_active_in_daily_trade": True,   # wired in this commit
+            "vol_targeting_active_in_daily_trade": False,         # NOT wired (TODO)
+            "sector_concentration_cap_active": False,             # NOT wired (TODO)
+            "fill_anchored_stops_active": False,                  # NOT wired (TODO)
+            "universe_uses_point_in_time_membership": False,      # uses load_top50_snapshot — survivorship-biased
+            "conviction_weighted_strategy_outputs": False,        # all 3 strategies equal-weight their picks
+            "_notes": (
+                "These flags indicate whether 'advertised' risk-management features are "
+                "actually called in the live trading path. A False here is a dead-code or "
+                "missing-feature signal — the analyst should flag it via pipeline_findings."
+            ),
+        },
+        "industry_norms_for_comparison": {
+            "max_position_weight_institutional": "0.03 to 0.05 (3-5%)",
+            "max_drawdown_kill_institutional": "0.10 to 0.15 (10-15%)",
+            "min_sharpe_institutional_floor": "0.7 to 1.0",
+            "max_strategy_drawdown_institutional": "0.15 to 0.20 (15-20%)",
+            "sector_concentration_typical_cap": "0.20 to 0.30 (20-30%)",
+            "top3_concentration_typical_cap": "0.25 to 0.30 (25-30%)",
+        },
+    }
+
+
 def _compute_monthly_metrics(
     daily_runs: list[dict],
     equity_curve: dict[date, float],
@@ -364,6 +450,12 @@ def run_monthly_review(
         # would obscure. The analyst is told to triangulate THREE sources:
         # weekly narratives + raw daily table + these metrics.
         monthly_metrics = _compute_monthly_metrics(daily_runs, equity_curve)
+        # Pipeline self-audit snapshot — exposes hardcoded constants +
+        # config values + wiring status so the analyst can flag drift
+        # between them, dead-wired risk features, and gates that fall
+        # below institutional norms. See ai_analyst._build_user_message
+        # and ANALYST.md §6 step 5c.
+        pipeline_snapshot = _build_pipeline_snapshot(config)
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
@@ -372,9 +464,47 @@ def run_monthly_review(
             grid_search_summary=grid_search_summary,
             recent_weekly_reports=recent_weeklies,
             monthly_metrics=monthly_metrics,
+            pipeline_snapshot=pipeline_snapshot,
         )
         # Always include the qualitative analysis in the email.
         recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")
+
+        # -------- 3a. Pipeline self-audit findings (surfaced PROMINENTLY) ---
+        # These are infrastructure issues — config drift, dead-wired risk
+        # features, gates below institutional norms. They're rendered at
+        # the TOP of recommendations (above strategy proposals) because
+        # they affect every position the agent ever takes, not just one
+        # new strategy. The operator decides what to act on.
+        if ai_report.pipeline_findings:
+            sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            sorted_findings = sorted(
+                ai_report.pipeline_findings,
+                key=lambda f: sev_order.get(f.severity.lower(), 4),
+            )
+            sev_emoji = {
+                "critical": "🚨", "high": "🔴", "medium": "🟠", "low": "🟡",
+            }
+            lines = ["## 🛠️ Pipeline Self-Audit Findings", ""]
+            lines.append(
+                f"_{len(ai_report.pipeline_findings)} infrastructure issue(s) "
+                "the analyst found this month. These are NOT strategy ideas — "
+                "they're config drift / dead code / weak risk thresholds. "
+                "Operator review required (no auto-apply for safety-critical changes)._\n"
+            )
+            for f in sorted_findings:
+                emoji = sev_emoji.get(f.severity.lower(), "")
+                lines.append(
+                    f"### {emoji} {f.severity.upper()} — {f.category}\n\n"
+                    f"**Issue**: {f.description}\n\n"
+                    f"**Recommendation**: {f.recommendation}\n"
+                )
+            # INSERT at position 0 so it lands at the TOP of the email,
+            # above the AI Analysis section.
+            recommendations.insert(0, "\n".join(lines))
+        else:
+            recommendations.append(
+                "_AI analyst pipeline self-audit: no infrastructure findings this month._"
+            )
 
         # -------- 3b. Surface any proposed state-change (trail_pct) ---------
         # We do NOT auto-apply state changes — risk-management tuning is

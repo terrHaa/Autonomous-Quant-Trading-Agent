@@ -170,6 +170,126 @@ def test_run_daily_trade_is_idempotent_when_record_exists(tmp_path: Path, _in_tr
     assert first_call_snapshot, "first call should have hit the executor"
 
 
+def test_kill_switch_tripped_when_drawdown_exceeds_threshold(tmp_path: Path) -> None:
+    """If equity is more than threshold% below peak (computed from run JSONs),
+    the kill switch trips. Reads peak across the persisted run history."""
+    # Lay down 3 runs with equity series 100k → 110k (peak) → 92k.
+    # Current equity 90k → drawdown vs peak = (90k - 110k) / 110k = -18.2%.
+    # Threshold 0.15 → tripped.
+    from quant.agent.log import save_daily_run
+    from quant.execution.alpaca_executor import ExecutionReport
+    for d, eq in [
+        (date(2024, 6, 3), 100_000.0),
+        (date(2024, 6, 4), 110_000.0),
+        (date(2024, 6, 5),  92_000.0),
+    ]:
+        rep = ExecutionReport(
+            env="paper", timestamp=datetime.now(UTC),
+            account_equity_before=eq, positions_before={},
+            target_weights={}, proposed_orders=[], submitted_orders=[],
+            dry_run=False, notes="",
+        )
+        save_daily_run(
+            run_date=d, strategy_name="x", strategy_params={},
+            target_weights={}, signal_prices={}, execution_report=rep,
+            runs_dir=tmp_path,
+        )
+    tripped, peak, dd = daily_runner._kill_switch_tripped(
+        current_equity=90_000.0, runs_dir=tmp_path, threshold=0.15,
+    )
+    assert tripped is True
+    assert peak == 110_000.0
+    assert dd < -0.15
+
+
+def test_kill_switch_does_not_trip_when_drawdown_within_threshold(tmp_path: Path) -> None:
+    """A modest drawdown (within threshold) does NOT trip the kill switch."""
+    from quant.agent.log import save_daily_run
+    from quant.execution.alpaca_executor import ExecutionReport
+    for d, eq in [
+        (date(2024, 6, 3), 100_000.0),
+        (date(2024, 6, 4), 105_000.0),    # peak
+    ]:
+        rep = ExecutionReport(
+            env="paper", timestamp=datetime.now(UTC),
+            account_equity_before=eq, positions_before={},
+            target_weights={}, proposed_orders=[], submitted_orders=[],
+            dry_run=False, notes="",
+        )
+        save_daily_run(
+            run_date=d, strategy_name="x", strategy_params={},
+            target_weights={}, signal_prices={}, execution_report=rep,
+            runs_dir=tmp_path,
+        )
+    # Current 100k vs peak 105k = -4.8%, within 15% threshold.
+    tripped, peak, dd = daily_runner._kill_switch_tripped(
+        current_equity=100_000.0, runs_dir=tmp_path, threshold=0.15,
+    )
+    assert tripped is False
+    assert peak == 105_000.0
+    assert dd > -0.15
+
+
+def test_kill_switch_handles_no_history(tmp_path: Path) -> None:
+    """Fresh install (no run JSONs yet) → no peak to compare → don't trip."""
+    tripped, peak, dd = daily_runner._kill_switch_tripped(
+        current_equity=100_000.0, runs_dir=tmp_path / "nope", threshold=0.15,
+    )
+    assert tripped is False
+    assert dd == 0.0
+
+
+def test_pipeline_snapshot_exposes_drift_signal() -> None:
+    """The snapshot must include both code constants AND config values for
+    the same risk knob so the analyst can spot drift. Regression guard
+    for the June 2026 incident (20% in code vs 5% in config went unnoticed)."""
+    import yaml
+
+    from quant.agent.monthly_review import _build_pipeline_snapshot
+    from quant.config import DEFAULT_CONFIG_PATH, Config
+    config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
+    snap = _build_pipeline_snapshot(config)
+    # Operator hard rules from code are exposed
+    code_rules = snap["operator_hard_rules_in_code"]
+    assert "MAX_POSITION_WEIGHT" in code_rules
+    assert "MAX_DRAWDOWN_KILL" in code_rules
+    # Config values for the SAME knobs are exposed alongside
+    cfg_vals = snap["config_yaml_values"]
+    assert "risk_max_position_weight" in cfg_vals
+    assert "risk_max_drawdown_kill" in cfg_vals
+    # Wiring status flags
+    wiring = snap["wiring_status"]
+    assert "drawdown_kill_switch_active_in_daily_trade" in wiring
+    assert "vol_targeting_active_in_daily_trade" in wiring
+    # Industry-norm reference values
+    norms = snap["industry_norms_for_comparison"]
+    assert "max_position_weight_institutional" in norms
+
+
+def test_pipeline_snapshot_position_cap_aligned_with_config() -> None:
+    """REGRESSION GUARD for the original drift: the hardcoded operator's
+    position cap MUST match configs/default.yaml. The June 2026 incident
+    was 20% in code vs 5% in config — silent 4× looser than policy.
+
+    If this test ever fails, either:
+      (a) someone changed the code constant without updating yaml, or
+      (b) someone changed yaml without updating the code constant.
+    Both are bugs of the same class.
+    """
+    import yaml
+
+    from quant.agent.monthly_review import _build_pipeline_snapshot
+    from quant.config import DEFAULT_CONFIG_PATH, Config
+    config = Config.model_validate(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()))
+    snap = _build_pipeline_snapshot(config)
+    code_val = snap["operator_hard_rules_in_code"]["MAX_POSITION_WEIGHT"]
+    cfg_val = snap["config_yaml_values"]["risk_max_position_weight"]
+    assert code_val == cfg_val, (
+        f"POSITION CAP DRIFT: code={code_val}, config={cfg_val}. "
+        "These must stay in sync — they're the same operator rule."
+    )
+
+
 def test_run_daily_trade_skips_outside_window(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -297,7 +417,11 @@ def test_run_daily_trade_passes_operator_constants_to_executor(tmp_path: Path, _
         dry_run=True,
     )
     assert executor.last_call["stop_loss_pct"] == daily_runner.STOP_LOSS_PCT == 0.05
-    assert executor.last_call["max_position_weight"] == daily_runner.MAX_POSITION_WEIGHT == 0.20
+    # Operator's per-trade cap: 5% (matches configs/default.yaml).
+    # If you tighten/loosen this, also bump configs/default.yaml's
+    # risk.max_position_weight to match (the analyst's monthly self-audit
+    # will flag the drift if you forget).
+    assert executor.last_call["max_position_weight"] == daily_runner.MAX_POSITION_WEIGHT == 0.05
 
 
 def test_run_daily_trade_includes_held_names_in_signal_prices(tmp_path: Path, _in_trade_window) -> None:

@@ -61,8 +61,23 @@ logger = logging.getLogger(__name__)
 # OPERATOR'S HARD RULES — hard-coded here, deliberately NOT in YAML and
 # NOT in the tunable StrategyParams file. The auto-improver cannot
 # change these. If you want to change them, edit the source.
+#
+# These MUST stay in sync with configs/default.yaml's `risk:` block;
+# the monthly pipeline self-audit (in monthly_review) cross-checks the
+# two and surfaces any drift as a critical finding. If you change one,
+# change both.
 STOP_LOSS_PCT = 0.05            # 5% stop on every entry
-MAX_POSITION_WEIGHT = 0.20      # 20% per-trade cap
+MAX_POSITION_WEIGHT = 0.05      # 5% per-trade cap (was 20%; tightened to
+                                # match configs/default.yaml's risk
+                                # block. At 20% a single -25% gap on one
+                                # name = -5% portfolio drawdown, which
+                                # no institutional shop accepts.)
+# Drawdown kill switch threshold. If equity is more than this far below
+# its running peak (across the persisted daily-run history), the daily
+# trade routine refuses to open NEW entries. Existing positions retain
+# their stops; the system stops adding risk during a meltdown until
+# the operator intervenes. Mirrors configs/default.yaml: risk.max_drawdown_kill.
+MAX_DRAWDOWN_KILL = 0.15        # -15% halts new entries
 
 # Tunable parameters live in StrategyParams (persisted to
 # data/agent/strategy_params.json); the auto-improver may swap them
@@ -116,6 +131,107 @@ def _outside_trade_window(today_iso_date: date) -> bool:
     window_open = time(9, 0)
     window_close = time(9 + _TRADE_DEADLINE_HOURS_AFTER_OPEN, 35)   # 15:35 ET
     return not (window_open <= now_et.time() <= window_close)
+
+
+def _save_killswitch_record(
+    *,
+    today: date,
+    current_equity: float,
+    peak: float,
+    drawdown_pct: float,
+    runs_dir: Path | None = None,
+) -> None:
+    """Persist a sentinel run record indicating the kill switch tripped.
+
+    Writing this means the audit + report routines see "the system DID
+    fire today, but chose not to trade". Without this sentinel, the audit
+    would scream "no run record for today" which is misleading — the run
+    DID happen, it just deliberately exited early.
+    """
+    import json as _json
+
+    from quant.agent.log import DEFAULT_RUNS_DIR, _atomic_write_text
+    out_dir = runs_dir or DEFAULT_RUNS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "date": today.isoformat(),
+        "strategy_name": "(kill_switch_tripped)",
+        "strategy_params": {
+            "kill_switch": {
+                "tripped": True,
+                "current_equity": current_equity,
+                "peak_equity": peak,
+                "drawdown_pct": drawdown_pct,
+                "threshold_pct": -MAX_DRAWDOWN_KILL,
+            },
+        },
+        "target_weights": {},
+        "signal_prices": {},
+        "execution_report": {
+            "env": "paper",
+            "account_equity_before": current_equity,
+            "positions_before": {},
+            "target_weights": {},
+            "proposed_orders": [],
+            "submitted_orders": [],
+            "dry_run": False,
+            "notes": (
+                f"DRAWDOWN KILL SWITCH TRIPPED — "
+                f"{drawdown_pct:.2%} drawdown vs peak ${peak:,.2f} "
+                f"(threshold -{MAX_DRAWDOWN_KILL:.0%}). Refused to open new "
+                "entries. Operator review required."
+            ),
+        },
+    }
+    out_path = out_dir / f"{today.isoformat()}.json"
+    _atomic_write_text(out_path, _json.dumps(payload, default=str, indent=2))
+
+
+def _kill_switch_tripped(
+    current_equity: float,
+    *,
+    runs_dir: Path | None = None,
+    threshold: float = MAX_DRAWDOWN_KILL,
+) -> tuple[bool, float, float]:
+    """Check the drawdown kill switch against persisted equity history.
+
+    Walks every saved daily-run JSON to find the historical peak equity,
+    compares to ``current_equity``, and trips if the drawdown exceeds
+    ``threshold``. Returns ``(tripped, peak, drawdown_pct)``.
+
+    Why compute fresh from history each run rather than persisted state:
+    the daily-trade routine is stateless across runs (each invocation is
+    a clean process). The run JSONs are the source of truth for equity
+    history — they're already written by save_daily_run.
+
+    Trip semantics: when tripped, ``run_daily_trade`` REFUSES to open new
+    entries (returns None). Existing positions and their GTC stops are
+    untouched, so the system stops adding risk but still protects what's
+    held. Operator intervention is required to resume — there is no
+    auto-reset.
+    """
+    from quant.agent.log import DEFAULT_RUNS_DIR
+    out_dir = runs_dir or DEFAULT_RUNS_DIR
+    if not out_dir.exists():
+        return False, current_equity, 0.0
+
+    peak = current_equity
+    import json as _json
+    for p in out_dir.glob("*.json"):
+        try:
+            payload = _json.loads(p.read_text())
+            eq = payload.get("execution_report", {}).get(
+                "account_equity_before", 0.0
+            )
+            if isinstance(eq, (int, float)) and eq > peak:
+                peak = float(eq)
+        except (OSError, ValueError):
+            continue
+
+    if peak <= 0:
+        return False, peak, 0.0
+    drawdown = (current_equity - peak) / peak
+    return drawdown < -threshold, peak, drawdown
 
 
 def run_daily_trade(
@@ -187,6 +303,41 @@ def run_daily_trade(
         "hrp_weights=%s",
         today, dry_run, len(universe), executor.env, state.hrp_weights,
     )
+
+    # --- 0b. Drawdown kill switch (operator hard rule) ---
+    # If the portfolio is in a meaningful drawdown vs its historical peak,
+    # stop opening NEW entries. Existing positions + their GTC stops are
+    # left untouched (we still want to protect what's held). The check
+    # only fires for non-dry-run; tests + debug invocations bypass it.
+    if not dry_run:
+        try:
+            current_equity = executor.get_equity()
+            tripped, peak, dd = _kill_switch_tripped(
+                current_equity, runs_dir=runs_dir,
+            )
+            if tripped:
+                logger.error(
+                    "DRAWDOWN KILL SWITCH TRIPPED — equity $%.2f is %.1f%% "
+                    "below peak $%.2f (threshold = -%.0f%%). Refusing to "
+                    "open new entries. Existing positions + GTC stops "
+                    "retained. Operator review required before resuming.",
+                    current_equity, dd * 100, peak, MAX_DRAWDOWN_KILL * 100,
+                )
+                # Persist a "kill switch tripped" run record so the audit
+                # and reports surface this prominently.
+                _save_killswitch_record(
+                    today=today, current_equity=current_equity, peak=peak,
+                    drawdown_pct=dd, runs_dir=runs_dir,
+                )
+                return None
+        except Exception as e:
+            # Failure to READ equity shouldn't block the trade — fall
+            # through and let the normal flow handle it (it'll fail
+            # later if the broker is genuinely unreachable).
+            logger.warning(
+                "kill switch check failed (continuing): %s: %s",
+                type(e).__name__, e,
+            )
 
     # --- 1. Fetch bars covering the longest signal window ---
     # SMA(50,200) needs the most history; budget 250 trading days + buffer

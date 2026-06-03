@@ -48,6 +48,32 @@ For trail_pct: the weekly analyst correctly noted XOM appears in top-3 positions
 _No strategy proposed this month._
 
 ---
+
+### 2026-06-01 — Monthly Review
+
+**Grid-search step**: Evaluated 8 candidates. No improvement found: no candidate beat current on BOTH Sharpe and max drawdown
+
+**Outcome**: `no_proposal`
+
+**Sandbox result**: (no proposal made)
+
+**Analysis**:
+
+This is the second monthly review, now with 3 trading days of data (2026-05-27 through 2026-05-29). The +1.04% return and 100% win rate (2/2 daily returns) remain statistically meaningless—with n=2 daily returns, we cannot draw any inference about strategy efficacy. The annualized Sharpe of 136.5 is a mathematical artifact that will collapse toward realistic values as the sample grows. I estimate we need at least 20 trading days before proposing any new strategy with confidence.
+
+Triangulating the three data sources shows complete consistency this month: (1) The weekly narrative identifies LLY (+5.8%) and ORCL (+5.5%) as top contributors with energy/industrials (LIN -2.5%, CAT -2.3%, XOM -1.9%) as drags. (2) The raw daily table confirms steady gains Thursday (+0.56%) and Friday (+0.47%) with stable positions (XOM, COST, PM/WMT/NVDA rotating through top-3). (3) The monthly statistical view's top-10 gainers/losers align exactly with the weekly narrative. No disagreement exists—this is trivially true with only 3 days of data where the weekly IS the monthly. The day-of-week breakdown (Thu: +0.56%, Fri: +0.47%) shows no calendar effect, but with n=1 observation per day, this is pure noise.
+
+The weekly analyst flagged one item 'WORTH ESCALATING TO MONTHLY REVIEW': the mean reversion strategy's negative Sharpe (-0.50 over lookback). I explicitly addressed this in the prior monthly review and my assessment is unchanged. The mean reversion strategy is DESIGNED to underperform in trending regimes (per STRATEGY_LIBRARY.md §2 regime behavior). Its 3.8% HRP weight appropriately limits exposure. The strategy is behaving as documented—this is not a failure, it's regime-conditional performance. I will not propose modifications based on 3 days of data in a regime where underperformance is expected. If negative performance persists for 4+ weeks AND the market shifts to range-bound conditions (where mean reversion should excel) without improvement, that would warrant action.
+
+Regarding trail_pct: examining the trail_high table shows synthetic test values (SYM0-SYM9), not live positions—this appears to be test data. The actual positions (XOM, COST, PM, etc.) don't appear in trail_high, suggesting either the trail tracking isn't populating correctly or this is a display artifact. I cannot assess give-back or whipsaw patterns without accurate trail_high data for the actual held symbols. Position persistence of 94.6% indicates stable holdings, and I see no evidence of same-symbol sell→re-buy patterns in consecutive daily runs. No trail_pct change is warranted given insufficient evidence.
+
+Per EDGE_TAXONOMY.md, the genuine gaps buildable from OHLCV are: (1) volatility regime filter, (2) low-volatility anomaly/BAB, (3) volume confirmation, (4) breakout strategies. With only 3 days of live trading data, I cannot identify which gap would most improve risk-adjusted returns. A 20-day minimum is needed to observe strategy behavior across varied market conditions. Proposing now would be speculation. I return no strategy proposal this month.
+
+**Proposal**:
+
+_No strategy proposed this month._
+
+---
 <!-- ENTRIES_INSERTION_POINT — new entries appended above this comment by monthly_review.py -->
 
 _End of MEMORY.md_

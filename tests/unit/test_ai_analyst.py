@@ -398,6 +398,101 @@ def test_analyst_md_documents_weekly_cross_reference() -> None:
     assert "WORTH ESCALATING TO MONTHLY REVIEW" in prompt
 
 
+# ---------------------------------------------------------------------------
+# Pipeline self-audit — the institutional-grade infra-review pathway
+# ---------------------------------------------------------------------------
+
+
+def test_analyst_md_directs_pipeline_self_audit() -> None:
+    """ANALYST.md §6 step 5c must direct the analyst to run the monthly
+    pipeline self-audit and emit findings for drift/dead-code/etc."""
+    prompt = _build_system_prompt()
+    assert "Pipeline self-audit" in prompt
+    assert "pipeline_findings" in prompt
+    # The four finding categories must be documented:
+    assert "Drift" in prompt
+    assert "Dead code" in prompt
+    assert "Below industry norm" in prompt
+    assert "Missing safeguard" in prompt
+
+
+def test_response_shape_documents_pipeline_findings() -> None:
+    """The strict JSON response schema must show the pipeline_findings
+    array — otherwise the model won't emit it."""
+    prompt = _build_system_prompt()
+    assert "pipeline_findings" in prompt
+    assert "severity" in prompt
+    assert "recommendation" in prompt
+
+
+def test_analyze_passes_pipeline_snapshot_into_user_message() -> None:
+    """When monthly_review passes a pipeline_snapshot, the user message
+    must embed it AND tell the analyst to review it."""
+    from quant.agent.ai_analyst import PipelineFinding   # noqa: F401
+    analyst, client = _analyst_with_capturing_client(
+        '{"analysis": "x", "proposed_strategy": null, "pipeline_findings": []}'
+    )
+    snapshot = {
+        "operator_hard_rules_in_code": {"MAX_POSITION_WEIGHT": 0.20},
+        "config_yaml_values": {"risk_max_position_weight": 0.05},
+        "wiring_status": {"drawdown_kill_switch_active_in_daily_trade": False},
+        "industry_norms_for_comparison": {"max_position_weight_institutional": "0.03 to 0.05"},
+    }
+    analyst.analyze(
+        daily_runs=[], current_state={"hrp_weights": {}},
+        pipeline_snapshot=snapshot,
+    )
+    msg = client.last_user_msg
+    assert msg is not None
+    # Snapshot embedded as JSON
+    assert "Pipeline Self-Audit" in msg
+    assert "MAX_POSITION_WEIGHT" in msg
+    assert "drawdown_kill_switch_active_in_daily_trade" in msg
+    # Directives to act on it
+    assert "pipeline_findings" in msg
+    assert "drift" in msg.lower() or "Drift" in msg
+    assert "wiring_status" in msg
+
+
+def test_analyze_parses_pipeline_findings_list() -> None:
+    """A response with pipeline_findings must come back as a list of
+    PipelineFinding dataclass instances."""
+    raw = json.dumps({
+        "analysis": "...",
+        "proposed_strategy": None,
+        "proposed_state_changes": None,
+        "pipeline_findings": [
+            {
+                "severity": "critical",
+                "category": "drift",
+                "description": "MAX_POSITION_WEIGHT in code (0.20) != config (0.05).",
+                "recommendation": "Lower the code constant to 0.05.",
+            },
+            {
+                "severity": "high",
+                "category": "dead_code",
+                "description": "Drawdown kill switch is configured but not called.",
+                "recommendation": "Wire it into run_daily_trade.",
+            },
+        ],
+    })
+    analyst, _client = _analyst_with_capturing_client(raw)
+    report = analyst.analyze(daily_runs=[], current_state={})
+    assert len(report.pipeline_findings) == 2
+    assert report.pipeline_findings[0].severity == "critical"
+    assert report.pipeline_findings[0].category == "drift"
+    assert "MAX_POSITION_WEIGHT" in report.pipeline_findings[0].description
+    assert report.pipeline_findings[1].category == "dead_code"
+
+
+def test_analyze_handles_missing_pipeline_findings_as_empty_list() -> None:
+    """Old-format responses without pipeline_findings → empty list."""
+    raw = json.dumps({"analysis": "x", "proposed_strategy": None})
+    analyst, _ = _analyst_with_capturing_client(raw)
+    report = analyst.analyze(daily_runs=[], current_state={})
+    assert report.pipeline_findings == []
+
+
 def test_analyst_md_documents_triangulation() -> None:
     """ANALYST.md §6 step 5b must direct the monthly analyst to
     triangulate weekly narratives + raw daily table + monthly stats."""

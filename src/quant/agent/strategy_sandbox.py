@@ -94,8 +94,23 @@ def _raise_timeout(_signum, _frame) -> None:  # noqa: ANN001
 # wants, but only genuinely positive-expectation, statistically valid ones
 # make it through.
 
-_MIN_SHARPE: float = 0.30          # annualised, after costs
-_MAX_DRAWDOWN_ABS: float = 0.35    # 35% max peak-to-trough, absolute
+# Institutional-grade gates. The earlier values (Sharpe 0.30, DD 35%)
+# were retail-research floors that would let mediocre strategies into a
+# real-capital ensemble; tightened to thresholds a professional shop
+# would accept.
+#
+#   _MIN_SHARPE:          0.30 → 0.70 — retail floor is ~0.7;
+#                         institutional shops typically want 1.0+. We
+#                         compromise at 0.7 so the analyst can still
+#                         propose strategies periodically, but
+#                         mediocrity no longer ships to real capital.
+#   _MAX_DRAWDOWN_ABS:    0.35 → 0.20 — 35% drawdown on a single
+#                         strategy is a career-ending blowup; no real
+#                         shop accepts it. 20% matches institutional norms.
+#   _DSR_THRESHOLD:       0.95 unchanged — multi-testing correction is
+#                         already at the right level.
+_MIN_SHARPE: float = 0.70          # annualised, after costs
+_MAX_DRAWDOWN_ABS: float = 0.20    # 20% max peak-to-trough, absolute
 _DSR_THRESHOLD: float = 0.95       # 95th-percentile confidence after multi-testing
 
 # ---- Allowed top-level modules in AI-generated code -----------------------

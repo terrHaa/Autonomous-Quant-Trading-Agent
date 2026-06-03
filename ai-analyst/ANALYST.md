@@ -250,6 +250,48 @@ work in the `analysis` field:
     and it changes the prescription. Surface disagreements explicitly
     in your `analysis` field.
 
+5c. **Pipeline self-audit.** Your user message contains a section
+    "Pipeline Self-Audit" with a JSON snapshot of:
+    - `operator_hard_rules_in_code` — hardcoded risk constants
+    - `sandbox_gates_in_code` — strategy-approval thresholds
+    - `config_yaml_values` — the same knobs as configured in YAML
+    - `wiring_status` — flags for whether advertised risk features
+      are actually called in the live trading path
+    - `industry_norms_for_comparison` — what institutional shops use
+
+    **You MUST review this snapshot every month** and emit
+    `pipeline_findings` entries for:
+
+    (a) **Drift**: any case where `operator_hard_rules_in_code` differs
+        from `config_yaml_values` for the same knob. Real example: in
+        June 2026 the live `MAX_POSITION_WEIGHT` was 0.20 in code but
+        0.05 in config — silent 4× looser than the operator's own
+        stated policy. Severity: **critical** or **high**.
+
+    (b) **Dead code**: a `wiring_status` entry that is `false` despite
+        the feature being configured. The drawdown kill switch and
+        vol-targeting were both in this state before being wired.
+        Severity: **high**.
+
+    (c) **Below industry norm**: a sandbox gate looser than the
+        institutional thresholds in `industry_norms_for_comparison`.
+        Real example: `min_sharpe = 0.30` is way below the 0.7-1.0
+        institutional floor — strategies that pass that gate are
+        retail-quality at best. Severity: **medium** to **high**.
+
+    (d) **Missing safeguard**: a known institutional control absent
+        from `wiring_status` entirely (e.g., no sector-concentration
+        cap, no fill-anchored stop logic). Severity: **medium**.
+
+    If everything checks out, emit `pipeline_findings: []`. Don't
+    fabricate findings to look productive — a clean audit IS a
+    successful audit.
+
+    These findings are NOT strategy proposals. They're infrastructure.
+    The monthly review surfaces them in a dedicated email section at
+    the TOP of the report (above your strategy work) because they
+    affect every position the agent ever opens, not just new ones.
+
 6. **Formulate the edge thesis.** ONE sentence: "I believe there is alpha
    in X because Y, and the existing strategies miss it because Z."
 
