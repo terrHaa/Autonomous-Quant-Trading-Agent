@@ -163,7 +163,91 @@ def test_analyze_can_return_both_strategy_and_state_change() -> None:
 def test_state_change_proposal_defaults() -> None:
     sc = StateChangeProposal()
     assert sc.trail_pct is None
+    assert sc.sma_fast is None
+    assert sc.sma_slow is None
+    assert sc.mr_lookback is None
+    assert sc.mr_threshold_pct is None
     assert sc.reasoning == ""
+
+
+# ---------------------------------------------------------------------------
+# T4.22 — parser handles SMA/MR knobs in addition to trail_pct
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_parses_sma_fields() -> None:
+    """SMA crossover knobs come through as ints."""
+    raw = json.dumps({
+        "analysis": "fast SMA too short for current regime",
+        "proposed_strategy": None,
+        "proposed_state_changes": {
+            "sma_fast": 60,
+            "sma_slow": 220,
+            "reasoning": "shift to longer windows; 50/200 whipsawed in May",
+        },
+    })
+    report = _fake_analyst(raw).analyze(daily_runs=[], current_state={})
+    assert report.proposed_state_changes is not None
+    assert report.proposed_state_changes.sma_fast == 60
+    assert report.proposed_state_changes.sma_slow == 220
+    # Un-set knobs stay None.
+    assert report.proposed_state_changes.trail_pct is None
+    assert report.proposed_state_changes.mr_lookback is None
+    assert report.proposed_state_changes.mr_threshold_pct is None
+
+
+def test_analyze_parses_mr_fields() -> None:
+    """Mean-reversion knobs: lookback (int) + threshold_pct (float)."""
+    raw = json.dumps({
+        "analysis": "MR threshold too tight given recent vol regime",
+        "proposed_strategy": None,
+        "proposed_state_changes": {
+            "mr_lookback": 7,
+            "mr_threshold_pct": 0.025,
+            "reasoning": "loosen the baseline; vol-normalize will still scale per name",
+        },
+    })
+    report = _fake_analyst(raw).analyze(daily_runs=[], current_state={})
+    assert report.proposed_state_changes is not None
+    assert report.proposed_state_changes.mr_lookback == 7
+    assert report.proposed_state_changes.mr_threshold_pct == 0.025
+
+
+def test_analyze_parses_mixed_knobs() -> None:
+    """All five knobs in one proposal."""
+    raw = json.dumps({
+        "analysis": "comprehensive retune",
+        "proposed_strategy": None,
+        "proposed_state_changes": {
+            "trail_pct": 0.04,
+            "sma_fast": 30,
+            "sma_slow": 150,
+            "mr_lookback": 5,
+            "mr_threshold_pct": 0.03,
+            "reasoning": "regime shift evidence below",
+        },
+    })
+    sc = _fake_analyst(raw).analyze(daily_runs=[], current_state={}).proposed_state_changes
+    assert sc is not None
+    assert sc.trail_pct == 0.04
+    assert sc.sma_fast == 30
+    assert sc.sma_slow == 150
+    assert sc.mr_lookback == 5
+    assert sc.mr_threshold_pct == 0.03
+
+
+def test_analyze_gracefully_handles_unparseable_sma_field() -> None:
+    """Bad SMA value → whole proposal discarded (matches trail_pct behavior)."""
+    raw = json.dumps({
+        "analysis": "...",
+        "proposed_strategy": None,
+        "proposed_state_changes": {
+            "sma_fast": "fifty",  # not an int
+            "reasoning": "...",
+        },
+    })
+    report = _fake_analyst(raw).analyze(daily_runs=[], current_state={})
+    assert report.proposed_state_changes is None
 
 
 def test_analysis_report_state_change_optional() -> None:
@@ -290,18 +374,10 @@ def test_analyze_weekly_strips_markdown_fences() -> None:
 
 class _CapturingClient:
     """Fake Anthropic client that captures the user message for inspection."""
-    def __init__(self, raw_response: str = "ok"):
-        self.last_user_msg: str | None = None
-        self._raw = raw_response
-
-    class messages:
-        pass
-
-    def __init_subclass__(cls, **kw):
-        super().__init_subclass__(**kw)
 
     def _make_messages(self):
         outer = self
+
         class _M:
             @staticmethod
             def create(*, system, messages, **kw):
@@ -309,10 +385,11 @@ class _CapturingClient:
                 return SimpleNamespace(
                     content=[SimpleNamespace(text=outer._raw)]
                 )
+
         return _M
 
     def __init__(self, raw_response: str = "ok"):
-        self.last_user_msg = None
+        self.last_user_msg: str | None = None
         self._raw = raw_response
         self.messages = self._make_messages()
 

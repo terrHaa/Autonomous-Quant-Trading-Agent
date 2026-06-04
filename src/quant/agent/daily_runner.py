@@ -134,6 +134,43 @@ LOOKBACK_BUFFER_DAYS = 30       # extra bars to cover non-trading days
 _TRADE_DEADLINE_HOURS_AFTER_OPEN = 6
 
 
+def _market_is_closed_today(today: date, executor: Any = None) -> tuple[bool, str]:
+    """Query Alpaca's market-calendar API for ``today``.
+
+    Returns ``(is_closed, reason)`` — reason is a human-readable string
+    suitable for logs / emails. Failures (network, API outage) treat
+    the day as OPEN so we don't accidentally skip a real trading day
+    on a transient API issue — the bar-freshness check (T3.18) catches
+    "we tried to trade but markets weren't actually open" downstream.
+
+    Detection logic:
+      - If today is a weekend or full holiday: no calendar entry →
+        closed.
+      - If today has a calendar entry: open. Half-day handling
+        (Christmas Eve early close at 13:00 ET) is captured by the
+        calendar's ``close`` field, which the trade-window guard
+        could read in a future change. For now, half-days are
+        treated as full days — we trade at 09:35 ET and the early
+        close at 13:00 ET still gives us 3.5 hours before our
+        15:35 ET deadline guard fires.
+    """
+    if executor is None:
+        # No executor means no broker connection; skip the check.
+        # Caller should rely on the bar-freshness check downstream.
+        return False, "no executor (skipping market-calendar check)"
+    try:
+        from alpaca.trading.requests import GetCalendarRequest
+        req = GetCalendarRequest(start=today, end=today)
+        cal = executor._client.get_calendar(req)
+    except Exception as e:
+        # Calendar lookup failure — assume open and let other safety
+        # layers catch it.
+        return False, f"calendar lookup failed ({e}); assuming open"
+    if not cal:
+        return True, "Alpaca calendar has no entry for today (weekend/holiday)"
+    return False, f"market open ({cal[0].open}–{cal[0].close} ET)"
+
+
 def _outside_trade_window(today_iso_date: date) -> bool:
     """True iff current US/Eastern wall clock is NOT inside the trade window
     for today_iso_date. The window is 09:00–15:35 ET on the trade day.
@@ -540,6 +577,20 @@ def run_daily_trade(
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
     state = ensemble_state or load_ensemble_state()
+
+    # T4.20 — Holiday awareness. The trade-window guard above only
+    # checks the wall clock; it doesn't know the market calendar. On a
+    # full holiday (Christmas Day, Independence Day, etc.) the launchd
+    # job still fires at 21:35 CST but the market is closed. Without
+    # this check the agent would burn API calls trying to trade.
+    if not dry_run:
+        is_closed, reason = _market_is_closed_today(today, executor=executor)
+        if is_closed:
+            logger.info(
+                "run_daily_trade: market closed for %s (%s); exiting cleanly.",
+                today, reason,
+            )
+            return None
 
     logger.info(
         "run_daily_trade: today=%s dry_run=%s universe_size=%d env=%s "

@@ -321,10 +321,27 @@ applies uniformly to every position, regardless of which strategy
 generated the entry signal. See STRATEGY_LIBRARY.md → "Risk-Management
 Components" for the full mechanism.
 
-The single knob you control here is **`trail_pct`** — the trailing-stop
-distance. Default 0.05 (same as a static 5% stop). Constraint:
-`0 < trail_pct ≤ 0.05`. A tighter trail locks in more gain on winners
-but causes more whipsaw exits. A trail near 0.05 lets winners breathe.
+You control five knobs here via the `proposed_state_changes` field:
+
+**Exit / risk:**
+- **`trail_pct`** — trailing-stop distance (default 0.05;
+  must be in (0, 0.05]). Tighter = locks in more gain, more whipsaw.
+
+**SMA crossover sub-strategy:**
+- **`sma_fast`** — fast SMA window (default 50; typical 20-100)
+- **`sma_slow`** — slow SMA window (default 200; typical 100-300).
+  Must be > sma_fast.
+
+**Mean-reversion sub-strategy:**
+- **`mr_lookback`** — MA window (default 5; typical 3-10)
+- **`mr_threshold_pct`** — deviation threshold (default 0.02;
+  typical 0.005-0.05). The vol-normalization layer scales this
+  per-name anyway, so changes here move the BASELINE not the
+  per-name signal.
+
+You may propose changes to any subset; un-set fields stay unchanged.
+The trail_pct documentation below applies to that one knob; the same
+"propose ONLY with quantitative evidence" rule applies to all four.
 
 **You should propose a `trail_pct` change when**:
 

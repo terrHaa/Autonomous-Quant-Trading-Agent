@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from quant.agent.params import StrategyParams
+from quant.agent.params import MrParams, SmaParams, StrategyParams
 from quant.backtest.engine import run_backtest
 from quant.config import Config
 from quant.evaluation.dsr import (
@@ -46,7 +46,7 @@ from quant.evaluation.dsr import (
     estimate_var_sr_from_trials,
 )
 from quant.evaluation.metrics import metrics_for
-from quant.strategies import CrossSectionalMomentum
+from quant.strategies import CrossSectionalMomentum, MeanReversion, SmaCrossover
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,16 @@ def default_grid() -> list[StrategyParams]:
                     top_k=top_k, lookback=lookback, skip=skip,
                 ))
     return grid
+
+
+# T4.22 — backtest helpers for SMA and MR so the monthly review can
+# pass current-baseline performance into the AI analyst. The analyst
+# then has visibility into all three strategies' performance, not
+# just xsec — and can recommend SMA/MR param changes via the
+# structured ``proposed_state_changes`` channel (which now supports
+# sma_fast/sma_slow/mr_lookback/mr_threshold_pct in addition to
+# trail_pct). Auto-apply remains xsec-only; SMA/MR tuning goes
+# through analyst recommendation + operator approval.
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +134,48 @@ def evaluate_candidate(
         lookback=params.lookback,
         skip=params.skip,
     )
+    return _evaluate_strategy(strategy, params, universe=universe, bars=bars, config=config)
+
+
+def evaluate_sma_candidate(
+    params: SmaParams,
+    *,
+    universe: list[str],
+    bars: pd.DataFrame,
+    config: Config,
+) -> tuple[ImprovementCandidate, pd.Series]:
+    """Backtest one SMA candidate. Same return shape as evaluate_candidate."""
+    strategy = SmaCrossover(universe, fast=params.fast, slow=params.slow)
+    return _evaluate_strategy(strategy, params, universe=universe, bars=bars, config=config)
+
+
+def evaluate_mr_candidate(
+    params: MrParams,
+    *,
+    universe: list[str],
+    bars: pd.DataFrame,
+    config: Config,
+) -> tuple[ImprovementCandidate, pd.Series]:
+    """Backtest one mean-reversion candidate."""
+    strategy = MeanReversion(
+        universe,
+        lookback=params.lookback,
+        threshold_pct=params.threshold_pct,
+        vol_normalize=params.vol_normalize,
+        vol_multiplier=params.vol_multiplier,
+    )
+    return _evaluate_strategy(strategy, params, universe=universe, bars=bars, config=config)
+
+
+def _evaluate_strategy(
+    strategy,
+    params,
+    *,
+    universe: list[str],
+    bars: pd.DataFrame,
+    config: Config,
+) -> tuple[ImprovementCandidate, pd.Series]:
+    """Shared backtest + metrics-pack-up logic for all three evaluators."""
     result = run_backtest(config=config, strategy=strategy, bars=bars)
     m = metrics_for(result)
     cand = ImprovementCandidate(
@@ -210,6 +262,17 @@ def search_improvements(
     # Filter to candidates that pass the Sharpe AND drawdown gates.
     # max_drawdown >= current.max_drawdown means "drawdown is smaller in
     # magnitude" because both are negative.
+    #
+    # T4.21 — turnover constraint (implicit).
+    # We do NOT have an explicit annual turnover cap. The Sharpe-improvement
+    # gate IS our turnover control: a candidate with materially higher
+    # turnover than the current params would have to overcome the implied
+    # higher transaction costs (modeled as friction in run_backtest) to beat
+    # current Sharpe. If a high-turnover candidate still beats current
+    # Sharpe net of those costs AND passes the DSR gate, the turnover is
+    # paying for itself. A v2 improver could add an explicit
+    # turnover_ratio_max gate; v1 lets the cost model do the work and keeps
+    # the search single-objective.
     better = [
         c for c in candidates
         if c.params != current_params

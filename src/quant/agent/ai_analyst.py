@@ -89,6 +89,10 @@ Return a single JSON object with this exact shape:
   } | null,
   "proposed_state_changes": {
     "trail_pct": <float in (0, 0.05] | null>,
+    "sma_fast": <int in [10, 100] | null>,
+    "sma_slow": <int in [50, 300] | null>,
+    "mr_lookback": <int in [2, 30] | null>,
+    "mr_threshold_pct": <float in (0.001, 0.1) | null>,
     "reasoning": "<quantitative evidence per ANALYST.md §6.5 — cite specific symbols, give-back magnitudes, or whipsaw counts from the daily runs table. Vague intuition is NOT acceptable.>"
   } | null,
   "pipeline_findings": [
@@ -198,6 +202,14 @@ class StateChangeProposal:
     simply have them absent.
     """
     trail_pct: float | None = None   # new trailing-stop distance, in (0, 0.05]
+    # T4.22 — SMA + MR knobs are now tunable via the analyst's structured
+    # channel. Each proposal MAY include any subset of these; None means
+    # "no change to that knob". The operator-side apply path validates
+    # the values before writing to EnsembleState.
+    sma_fast: int | None = None      # new SMA fast window (typical 20-100)
+    sma_slow: int | None = None      # new SMA slow window (typical 100-250)
+    mr_lookback: int | None = None   # new MR MA window (typical 3-10)
+    mr_threshold_pct: float | None = None    # new MR deviation threshold (0.005-0.05)
     reasoning: str = ""              # quantitative evidence for the change
 
 
@@ -556,11 +568,21 @@ class AIAnalyst:
         state_change_data = data.get("proposed_state_changes")
         state_change: StateChangeProposal | None = None
         if state_change_data and isinstance(state_change_data, dict):
+            def _opt_float(key: str) -> float | None:
+                raw = state_change_data.get(key)
+                return float(raw) if raw is not None else None
+
+            def _opt_int(key: str) -> int | None:
+                raw = state_change_data.get(key)
+                return int(raw) if raw is not None else None
+
             try:
-                raw_trail = state_change_data.get("trail_pct")
-                trail_pct = float(raw_trail) if raw_trail is not None else None
                 state_change = StateChangeProposal(
-                    trail_pct=trail_pct,
+                    trail_pct=_opt_float("trail_pct"),
+                    sma_fast=_opt_int("sma_fast"),
+                    sma_slow=_opt_int("sma_slow"),
+                    mr_lookback=_opt_int("mr_lookback"),
+                    mr_threshold_pct=_opt_float("mr_threshold_pct"),
                     reasoning=str(state_change_data.get("reasoning", "")),
                 )
             except (TypeError, ValueError) as e:

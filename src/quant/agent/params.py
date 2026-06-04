@@ -23,8 +23,9 @@ class StrategyParams:
     """Tunable parameters for the cross-sectional momentum sub-strategy.
 
     NOT the operator's hard rules (5% stop, 20% per-trade cap) — those
-    are constants in ``daily_runner.py``. NOT the SMA / mean-reversion
-    params either — those live directly on ``EnsembleState``.
+    are constants in ``daily_runner.py``. SMA + MR params have parallel
+    dataclasses below (``SmaParams``, ``MrParams``) — the monthly grid
+    search exercises all three.
 
     The improver builds a grid of these and the monthly review writes
     the winning tuple back into the surrounding ``EnsembleState``.
@@ -46,4 +47,47 @@ class StrategyParams:
         if self.skip >= self.lookback:
             raise ValueError(
                 f"skip ({self.skip}) must be < lookback ({self.lookback})"
+            )
+
+
+@dataclass(frozen=True)
+class SmaParams:
+    """Tunable parameters for the SMA crossover sub-strategy."""
+
+    fast: int = 50
+    slow: int = 200
+
+    def __post_init__(self) -> None:
+        if self.fast < 2:
+            raise ValueError(f"fast must be >= 2; got {self.fast}")
+        if self.slow <= self.fast:
+            raise ValueError(
+                f"slow ({self.slow}) must be > fast ({self.fast})"
+            )
+
+
+@dataclass(frozen=True)
+class MrParams:
+    """Tunable parameters for the mean-reversion sub-strategy.
+
+    Vol-normalize defaults match the strategy class's v2 defaults.
+    The improver may flip vol_normalize off to test the static-threshold
+    path — useful for backtest comparison.
+    """
+
+    lookback: int = 5
+    threshold_pct: float = 0.02
+    vol_normalize: bool = True
+    vol_multiplier: float = 1.5
+
+    def __post_init__(self) -> None:
+        if self.lookback < 2:
+            raise ValueError(f"lookback must be >= 2; got {self.lookback}")
+        if self.threshold_pct <= 0:
+            raise ValueError(
+                f"threshold_pct must be > 0; got {self.threshold_pct}"
+            )
+        if self.vol_multiplier <= 0:
+            raise ValueError(
+                f"vol_multiplier must be > 0; got {self.vol_multiplier}"
             )

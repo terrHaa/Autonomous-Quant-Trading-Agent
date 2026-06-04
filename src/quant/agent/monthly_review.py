@@ -537,34 +537,75 @@ def run_monthly_review(
                 "_AI analyst pipeline self-audit: no infrastructure findings this month._"
             )
 
-        # -------- 3b. Surface any proposed state-change (trail_pct) ---------
-        # We do NOT auto-apply state changes — risk-management tuning is
-        # too important to handle silently. The operator reviews and edits
-        # ensemble_state.json manually if they agree with the proposal.
+        # -------- 3b. Surface any proposed state-change ---------------------
+        # We do NOT auto-apply state changes — risk-management and strategy
+        # tuning is too important to handle silently. The operator reviews
+        # and edits ensemble_state.json manually if they agree with the
+        # proposal. Five knobs are tunable via this channel: trail_pct
+        # (exit risk), sma_fast / sma_slow (SMA crossover), mr_lookback /
+        # mr_threshold_pct (mean-reversion). See ANALYST.md §6.5.
         sc = ai_report.proposed_state_changes
-        if sc is not None and sc.trail_pct is not None:
-            new_val = sc.trail_pct
-            cur_val = current_state.trail_pct
-            # Light validation — surface a warning if the proposal violates
-            # the operator's hard ceiling. Don't suppress it; the operator
-            # might still want to see what the analyst was thinking.
+        if sc is not None:
             from quant.agent.daily_runner import STOP_LOSS_PCT
-            within_bounds = 0 < new_val <= STOP_LOSS_PCT
-            verdict = (
-                "VALID — within bounds; operator may apply by editing "
-                "`trail_pct` in `data/agent/ensemble_state.json`."
-                if within_bounds else
-                f"OUT OF BOUNDS — must be in (0, {STOP_LOSS_PCT}]. "
-                "Operator should NOT apply this value verbatim."
-            )
-            arrow = "↓" if new_val < cur_val else "↑" if new_val > cur_val else "→"
-            recommendations.append(
-                f"## 🎯 AI proposed `trail_pct` change\n\n"
-                f"**Current**: `{cur_val:.4f}` {arrow} **Proposed**: `{new_val:.4f}` "
-                f"({verdict})\n\n"
-                f"**Reasoning** (verbatim from analyst):\n\n"
-                f"> {sc.reasoning}\n"
-            )
+
+            # (proposed_value, current_value, field_name, fmt, validator)
+            # validator returns (within_bounds: bool, hint: str)
+            def _trail_valid(v: float) -> tuple[bool, str]:
+                return (0 < v <= STOP_LOSS_PCT,
+                        f"must be in (0, {STOP_LOSS_PCT}]")
+
+            def _sma_fast_valid(v: int) -> tuple[bool, str]:
+                slow = sc.sma_slow if sc.sma_slow is not None else current_state.sma_slow
+                return (2 <= v < slow, f"must be in [2, sma_slow={slow})")
+
+            def _sma_slow_valid(v: int) -> tuple[bool, str]:
+                fast = sc.sma_fast if sc.sma_fast is not None else current_state.sma_fast
+                return (v > fast, f"must be > sma_fast={fast}")
+
+            def _mr_lookback_valid(v: int) -> tuple[bool, str]:
+                return (v >= 2, "must be >= 2")
+
+            def _mr_threshold_valid(v: float) -> tuple[bool, str]:
+                return (v > 0, "must be > 0")
+
+            knob_specs = [
+                ("trail_pct", sc.trail_pct, current_state.trail_pct,
+                 "{:.4f}", _trail_valid),
+                ("sma_fast", sc.sma_fast, current_state.sma_fast,
+                 "{}", _sma_fast_valid),
+                ("sma_slow", sc.sma_slow, current_state.sma_slow,
+                 "{}", _sma_slow_valid),
+                ("mr_lookback", sc.mr_lookback, current_state.mr_lookback,
+                 "{}", _mr_lookback_valid),
+                ("mr_threshold_pct", sc.mr_threshold_pct, current_state.mr_threshold_pct,
+                 "{:.4f}", _mr_threshold_valid),
+            ]
+
+            proposed_lines: list[str] = []
+            for name, new_val, cur_val, fmt, validator in knob_specs:
+                if new_val is None:
+                    continue
+                within, hint = validator(new_val)
+                verdict = (
+                    "VALID — operator may apply by editing "
+                    f"`{name}` in `data/agent/ensemble_state.json`."
+                    if within else
+                    f"OUT OF BOUNDS — {hint}. "
+                    "Operator should NOT apply this value verbatim."
+                )
+                arrow = "↓" if new_val < cur_val else "↑" if new_val > cur_val else "→"
+                proposed_lines.append(
+                    f"- **`{name}`**: `{fmt.format(cur_val)}` {arrow} "
+                    f"`{fmt.format(new_val)}` ({verdict})"
+                )
+
+            if proposed_lines:
+                recommendations.append(
+                    "## 🎯 AI proposed state-change(s)\n\n"
+                    + "\n".join(proposed_lines)
+                    + f"\n\n**Reasoning** (verbatim from analyst):\n\n"
+                    f"> {sc.reasoning}\n"
+                )
 
         # -------- 4. Sandbox + gate the proposed strategy --------------------
         if ai_report.proposed_strategy is None:
