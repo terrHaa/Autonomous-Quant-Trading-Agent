@@ -90,8 +90,14 @@ class SmaCrossover:
         holds no state between bars, so re-running the backtest on the
         same data produces the same orders.
         """
-        # Decide which symbols pass the crossover filter this bar.
-        long_symbols: list[str] = []
+        # Decide which symbols pass the crossover filter, AND compute
+        # each one's CONVICTION = (fast - slow) / slow. A name where
+        # the fast SMA is 5% above slow has stronger trend than one
+        # where it's 0.5% above; we give the strong-trend name more
+        # capital instead of equal-weighting both. This is the
+        # "weight ∝ signal strength" principle that turns a binary
+        # filter into a graded one.
+        long_strengths: list[tuple[str, float]] = []
 
         for sym in self._symbols:
             # snapshot.bars is MultiIndex(symbol, timestamp). Slicing by
@@ -112,15 +118,18 @@ class SmaCrossover:
             fast_sma = float(closes.iloc[-self._fast:].mean())
             slow_sma = float(closes.iloc[-self._slow:].mean())
 
-            if fast_sma > slow_sma:
-                long_symbols.append(sym)
+            if fast_sma > slow_sma and slow_sma > 0:
+                strength = (fast_sma - slow_sma) / slow_sma
+                long_strengths.append((sym, strength))
 
-        if not long_symbols:
+        if not long_strengths:
             # Empty dict → engine flats every held position. Cash on the side.
             return {}
 
-        # Equal weight across the currently-long set. If we wanted
-        # capacity-weighting or vol-targeting per leg, those layers live in
-        # the allocator (quant.allocator) — strategies should stay simple.
-        weight = 1.0 / len(long_symbols)
-        return {sym: weight for sym in long_symbols}
+        # Conviction-weighted: weight ∝ strength / sum(strengths).
+        total = sum(s for _, s in long_strengths)
+        if total <= 0:
+            # Pathological fallback (all strengths zero somehow) → equal.
+            w = 1.0 / len(long_strengths)
+            return {sym: w for sym, _ in long_strengths}
+        return {sym: s / total for sym, s in long_strengths}

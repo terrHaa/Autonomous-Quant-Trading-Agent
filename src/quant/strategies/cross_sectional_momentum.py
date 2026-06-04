@@ -131,9 +131,23 @@ class CrossSectionalMomentum:
         if not signals:
             return {}
 
-        # Sort descending by return, take top K.
+        # Sort descending by return, take top K. We only ever go LONG
+        # the winners — names with negative momentum are dropped before
+        # weighting so a top-10 list dominated by losers doesn't get
+        # capital (better to under-deploy than to bet on losers).
         ranked = sorted(signals.items(), key=lambda kv: kv[1], reverse=True)
-        top = ranked[: self._top_k]
+        top = [(s, r) for s, r in ranked[: self._top_k] if r > 0]
+        if not top:
+            return {}
 
-        weight_each = 1.0 / len(top)
-        return {sym: weight_each for sym, _ in top}
+        # Conviction weighting: weight ∝ return magnitude / sum(returns).
+        # A name with +30% momentum gets ~3× the capital of one with +10%.
+        # This is the "weight by strength of signal" principle — equal-
+        # weighting throws away the magnitude information the signal
+        # itself produced.
+        total = sum(r for _, r in top)
+        if total <= 0:
+            # Defensive: shouldn't happen since we filtered r > 0 above.
+            w = 1.0 / len(top)
+            return {sym: w for sym, _ in top}
+        return {sym: r / total for sym, r in top}

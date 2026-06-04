@@ -259,6 +259,38 @@ def _kill_switch_tripped(
     return drawdown < -threshold, peak, drawdown
 
 
+def _build_trail_anchors(
+    bars,
+    target_weights: dict[str, float],
+    signal_prices: dict[str, float],
+) -> dict[str, float]:
+    """Per-symbol price to feed into ``update_trail_highs``.
+
+    Uses the latest bar's HIGH (not CLOSE) for each target symbol —
+    that's the actual intraday peak the stock reached. A stock that
+    spiked to $250 then closed at $240 gets a trail anchor of $250,
+    not $240. The trailing stop is then anchored to that real peak,
+    so we lock in more gain on the next bar.
+
+    Fallback to ``signal_prices`` (which is the close) for any symbol
+    whose HIGH is missing or non-positive — never worse than the
+    pre-change behaviour.
+    """
+    anchors: dict[str, float] = {}
+    for sym in target_weights:
+        try:
+            high = float(bars.loc[sym]["high"].iloc[-1])
+            if high > 0:
+                anchors[sym] = high
+                continue
+        except (KeyError, ValueError, AttributeError, IndexError):
+            pass
+        # Fallback to close.
+        if sym in signal_prices:
+            anchors[sym] = signal_prices[sym]
+    return anchors
+
+
 def _compute_atr_normalized_stops(
     *,
     symbols: list[str],
@@ -582,15 +614,18 @@ def run_daily_trade(
 
     # --- 3b. Update the trailing-stop ratchet -----------------------------
     # Compute new trail_high for every name we're about to hold. Bumped
-    # to today's signal_price (yesterday's close) if higher than the
-    # prior tracked high; fresh entries seeded with today's price; names
-    # being flatted are dropped. This is the trailing-stop mechanism —
-    # it converts the static 5%-below-entry stop into a 5%-below-
-    # running-high stop, locking in gains as winners run.
+    # to today's HIGH bar (not close) if higher than the prior tracked
+    # high; fresh entries seeded with today's high; names being flatted
+    # are dropped. Using HIGH not CLOSE means a stock that spiked
+    # intraday to $250 but closed at $240 STILL ratchets the trail to
+    # $250 — capturing the actual peak the stock hit, not just where
+    # the day finished. The trailing stop is anchored to that peak,
+    # so we lock in more gain when winners spike intraday.
+    trail_anchors = _build_trail_anchors(bars, target_weights, signal_prices)
     new_trail = update_trail_highs(
         prev_trail=dict(state.trail_high),
         new_targets=set(target_weights.keys()),
-        signal_prices=signal_prices,
+        signal_prices=trail_anchors,
     )
 
     # --- 3c. ATR-normalized per-symbol stop distances (T1.5) ----------

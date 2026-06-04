@@ -85,8 +85,12 @@ def test_top_k_one_selects_strongest_momentum_name() -> None:
     assert intents == {"WINNER": 1.0}
 
 
-def test_top_k_two_equal_weights() -> None:
-    """Top-2 → 0.5 each. Exact, because we're dividing 1.0 by 2."""
+def test_top_k_weighted_by_momentum_strength() -> None:
+    """Top-2 names → conviction-weighted by their momentum return.
+
+    BEST has steeper momentum than GOOD, so BEST gets more capital.
+    Weights still sum to 1.0 across the top-K.
+    """
     n = 70
     closes = {
         "BEST":  [100.0 + i * 0.5 for i in range(n)],
@@ -102,7 +106,37 @@ def test_top_k_two_equal_weights() -> None:
         ["BEST", "GOOD", "BAD", "WORST"], lookback=60, skip=5, top_k=2,
     )
     intents = strat.on_bar(snap)
-    assert intents == {"BEST": 0.5, "GOOD": 0.5}
+    assert set(intents) == {"BEST", "GOOD"}
+    assert sum(intents.values()) == pytest.approx(1.0)
+    # BEST has steeper momentum → larger weight than GOOD.
+    assert intents["BEST"] > intents["GOOD"], (
+        "Higher-momentum name MUST get more weight (conviction weighting). "
+        "Regression guard against equal-weighting that throws away signal "
+        "magnitude — pre-v2 behavior."
+    )
+
+
+def test_negative_momentum_names_dropped_from_top_k() -> None:
+    """If the top-K includes a name with NEGATIVE momentum, drop it.
+
+    Better to under-deploy than to bet on a loser just because it was
+    'less negative' than other losers."""
+    n = 70
+    closes = {
+        "WINNER": [100.0 + i * 0.5 for i in range(n)],   # +29% over window
+        "LOSER1": [100.0 - i * 0.1 for i in range(n)],   # -5% over window
+        "LOSER2": [100.0 - i * 0.3 for i in range(n)],   # -17% over window
+    }
+    bars = _bars_from_closes(closes)
+    last = bars.index.get_level_values("timestamp")[-1].date()
+    snap = Snapshot.from_full_bars(bars, as_of=last)
+    strat = CrossSectionalMomentum(
+        ["WINNER", "LOSER1", "LOSER2"], lookback=60, skip=5, top_k=3,
+    )
+    intents = strat.on_bar(snap)
+    # Only WINNER survives — losers dropped despite being in the top-K.
+    assert list(intents.keys()) == ["WINNER"]
+    assert intents["WINNER"] == pytest.approx(1.0)
 
 
 def test_skip_period_is_excluded_from_signal_window() -> None:

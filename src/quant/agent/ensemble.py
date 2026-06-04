@@ -102,9 +102,13 @@ class EnsembleState:
 
     # HRP weights — keyed by the strategies' ``name`` field. Sum to 1.0.
     # Default = equal weight across the three. Refit weekly.
+    # MR's ``_vol20x1.5`` suffix reflects vol-normalized threshold mode
+    # (default in v2). If you turn vol_normalize=False, the strategy
+    # name drops back to ``mean_reversion_5_200bp`` and the HRP key
+    # MUST be updated here OR build_strategies() will skip it.
     hrp_weights: dict[str, float] = field(default_factory=lambda: {
         "sma_crossover_50_200": 1 / 3,
-        "mean_reversion_5_200bp": 1 / 3,
+        "mean_reversion_5_200bp_vol20x1.5": 1 / 3,
         "xsec_momo_60_5_10": 1 / 3,
     })
     last_hrp_refit_date: str = ""   # ISO date; empty = never

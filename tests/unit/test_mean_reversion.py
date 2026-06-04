@@ -62,8 +62,33 @@ def test_name_encodes_parameters() -> None:
     s_other_lookback = MeanReversion(["AAPL"], lookback=10)
     s_other_threshold = MeanReversion(["AAPL"], threshold_pct=0.05)
     s_short = MeanReversion(["AAPL"], allow_short=True)
-    names = {s_default.name, s_other_lookback.name, s_other_threshold.name, s_short.name}
-    assert len(names) == 4
+    s_no_vol = MeanReversion(["AAPL"], vol_normalize=False)
+    s_other_vol = MeanReversion(["AAPL"], vol_multiplier=2.0)
+    names = {
+        s_default.name, s_other_lookback.name, s_other_threshold.name,
+        s_short.name, s_no_vol.name, s_other_vol.name,
+    }
+    assert len(names) == 6
+
+
+def test_default_is_vol_normalized() -> None:
+    """v2 default ON for the live agent. The legacy static-threshold
+    behaviour requires opt-out."""
+    assert MeanReversion(["AAPL"])._vol_normalize is True
+    # Name encodes it so the registry knows variants apart.
+    assert "vol20x1.5" in MeanReversion(["AAPL"]).name
+
+
+def test_static_threshold_when_vol_normalize_off() -> None:
+    """Opting out of vol-normalize restores the original deviation < -2% rule."""
+    bars = _bars_for_closes({"AAPL": [100.0] * 10 + [95.0]})
+    strat = MeanReversion(
+        ["AAPL"], lookback=5, threshold_pct=0.02, vol_normalize=False,
+    )
+    last = bars.index.get_level_values("timestamp")[-1].date()
+    snap = Snapshot.from_full_bars(bars, as_of=last)
+    intents = strat.on_bar(snap)
+    assert "AAPL" in intents
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +99,9 @@ def test_name_encodes_parameters() -> None:
 def test_insufficient_history_returns_empty() -> None:
     """Fewer than `lookback` closes → strategy stays flat (warmup)."""
     bars = _bars_for_closes({"AAPL": [100.0, 100.0]})   # 2 bars, lookback=5
-    strat = MeanReversion(["AAPL"], lookback=5, threshold_pct=0.02)
+    strat = MeanReversion(
+        ["AAPL"], lookback=5, threshold_pct=0.02, vol_normalize=False,
+    )
     last = bars.index.get_level_values("timestamp")[-1].date()
     snap = Snapshot.from_full_bars(bars, as_of=last)
     assert strat.on_bar(snap) == {}
@@ -88,7 +115,9 @@ def test_oversold_returns_long() -> None:
     Deviation = (95 - 99)/99 = -4.04% < -2% threshold → long.
     """
     bars = _bars_for_closes({"AAPL": [100.0] * 10 + [95.0]})
-    strat = MeanReversion(["AAPL"], lookback=5, threshold_pct=0.02)
+    strat = MeanReversion(
+        ["AAPL"], lookback=5, threshold_pct=0.02, vol_normalize=False,
+    )
     last = bars.index.get_level_values("timestamp")[-1].date()
     snap = Snapshot.from_full_bars(bars, as_of=last)
     assert strat.on_bar(snap) == {"AAPL": 1.0}
@@ -121,7 +150,9 @@ def test_within_threshold_returns_flat() -> None:
     # Last-5 MA after closes = [100,100,100,100,100.5] is (100*4+100.5)/5=100.1.
     # Deviation = (100.5 - 100.1)/100.1 ≈ 0.4% < 2% threshold.
     bars = _bars_for_closes({"AAPL": [100.0] * 9 + [100.0, 100.5]})
-    strat = MeanReversion(["AAPL"], lookback=5, threshold_pct=0.02)
+    strat = MeanReversion(
+        ["AAPL"], lookback=5, threshold_pct=0.02, vol_normalize=False,
+    )
     last = bars.index.get_level_values("timestamp")[-1].date()
     snap = Snapshot.from_full_bars(bars, as_of=last)
     assert strat.on_bar(snap) == {}
@@ -132,18 +163,51 @@ def test_within_threshold_returns_flat() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_multiple_longs_split_equally() -> None:
-    """Two oversold symbols → 50/50 weight (gross stays at 1.0)."""
+def test_multiple_longs_equal_deviation_split_equally() -> None:
+    """Two equally-oversold symbols → 50/50 weight (conviction is identical)."""
     bars = _bars_for_closes({
-        "AAPL": [100.0] * 10 + [95.0],     # oversold
-        "MSFT": [200.0] * 10 + [190.0],    # oversold
+        "AAPL": [100.0] * 10 + [95.0],     # ~ -4% deviation
+        "MSFT": [200.0] * 10 + [190.0],    # ~ -4% deviation (same %)
     })
-    strat = MeanReversion(["AAPL", "MSFT"], lookback=5, threshold_pct=0.02)
+    strat = MeanReversion(
+        ["AAPL", "MSFT"], lookback=5, threshold_pct=0.02,
+        vol_normalize=False,
+    )
     last = bars.index.get_level_values("timestamp")[-1].date()
     snap = Snapshot.from_full_bars(bars, as_of=last)
     intents = strat.on_bar(snap)
-    assert intents == {"AAPL": 0.5, "MSFT": 0.5}
+    # Equal deviations → equal conviction → equal weights.
+    assert intents["AAPL"] == pytest.approx(0.5)
+    assert intents["MSFT"] == pytest.approx(0.5)
     assert sum(intents.values()) == pytest.approx(1.0)
+
+
+def test_conviction_weighting_deeper_oversold_gets_more_capital() -> None:
+    """The whole point of conviction weighting: a deeply-oversold name
+    gets MORE capital than a barely-oversold one. Regression guard for
+    the equal-weight regression — if anyone ever 'simplifies' back to
+    1/N weighting, this test screams."""
+    bars = _bars_for_closes({
+        "AAPL": [100.0] * 10 + [90.0],     # ~ -10% deviation (deep)
+        "MSFT": [200.0] * 10 + [195.0],    # ~ -2.5% deviation (shallow)
+    })
+    strat = MeanReversion(
+        ["AAPL", "MSFT"], lookback=5, threshold_pct=0.02,
+        vol_normalize=False,
+    )
+    last = bars.index.get_level_values("timestamp")[-1].date()
+    snap = Snapshot.from_full_bars(bars, as_of=last)
+    intents = strat.on_bar(snap)
+    # AAPL is deeper oversold → gets more capital.
+    assert intents["AAPL"] > intents["MSFT"], (
+        "deeper-oversold name MUST get more weight (conviction weighting)"
+    )
+    # Total still sums to 1.0 (no leverage).
+    assert sum(intents.values()) == pytest.approx(1.0)
+    # Approximate ratio: deviation magnitudes are ~10% vs ~2.5%, so
+    # AAPL gets roughly 4× MSFT's weight. Loose tolerance because the
+    # deviation uses MA from the last 5 bars, not just the last close.
+    assert intents["AAPL"] / intents["MSFT"] == pytest.approx(4.0, rel=0.05)
 
 
 def test_partial_signal_only_one_side_filled() -> None:

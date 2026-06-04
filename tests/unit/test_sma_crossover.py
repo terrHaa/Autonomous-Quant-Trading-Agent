@@ -125,10 +125,16 @@ def test_partial_cross_produces_equal_weight_on_longs_only() -> None:
     assert intents == {"AAPL": 1.0}
 
 
-def test_two_longs_split_equally() -> None:
-    """Two symbols both in uptrend → 50/50 weight, summing to 1.0."""
+def test_two_longs_weighted_by_trend_strength() -> None:
+    """Two symbols both in uptrend → conviction-weighted by (fast-slow)/slow.
+
+    The steeper-uptrend name gets MORE capital. This is the v2
+    conviction-weighting upgrade over the legacy 1/N equal weight.
+    """
     bars = _bars_for_closes({
+        # AAPL grows +1 per day → steeper uptrend
         "AAPL": [100.0 + i for i in range(250)],
+        # MSFT grows +0.7 per day → milder uptrend
         "MSFT": [200.0 + i * 0.7 for i in range(250)],
     })
     strat = SmaCrossover(["AAPL", "MSFT"], fast=10, slow=200)
@@ -136,7 +142,35 @@ def test_two_longs_split_equally() -> None:
     snap = Snapshot.from_full_bars(bars, as_of=last_date)
 
     intents = strat.on_bar(snap)
-    assert intents == {"AAPL": 0.5, "MSFT": 0.5}
+    # Both selected, weights sum to 1.0, AAPL has higher conviction.
+    assert set(intents) == {"AAPL", "MSFT"}
+    assert sum(intents.values()) == pytest.approx(1.0)
+    assert intents["AAPL"] > intents["MSFT"], (
+        "Steeper trend MUST get more weight — this is the conviction-"
+        "weighting principle. Regression guard against any future "
+        "'simplify to 1/N' change that would throw away the magnitude."
+    )
+
+
+def test_two_equal_strength_longs_split_equally() -> None:
+    """When two names have IDENTICAL trend strength, conviction-weighting
+    degenerates to equal weights — sanity check on the math."""
+    bars = _bars_for_closes({
+        "AAPL": [100.0 + i for i in range(250)],
+        "MSFT": [200.0 + i * 2.0 for i in range(250)],   # same RELATIVE slope as AAPL
+    })
+    # Choose slopes so (fast - slow) / slow is equal for both → equal weights.
+    # AAPL slope=1 / mean ≈ 1/225 ≈ 0.44%.
+    # MSFT slope=2 / mean ≈ 2/425 ≈ 0.47%.
+    # Close but not exact; check that they're WITHIN 5% of equal.
+    strat = SmaCrossover(["AAPL", "MSFT"], fast=10, slow=200)
+    last_date = bars.index.get_level_values("timestamp")[-1].date()
+    snap = Snapshot.from_full_bars(bars, as_of=last_date)
+    intents = strat.on_bar(snap)
+    assert abs(intents["AAPL"] - intents["MSFT"]) < 0.1, (
+        f"approx-equal trend strengths should give approx-equal weights; "
+        f"got AAPL={intents['AAPL']:.3f}, MSFT={intents['MSFT']:.3f}"
+    )
     assert sum(intents.values()) == pytest.approx(1.0)
 
 
