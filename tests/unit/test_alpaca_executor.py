@@ -304,16 +304,145 @@ def test_submit_to_match_targets_dry_run_does_not_require_optin() -> None:
     assert len(report.submitted_orders) == 1
 
 
-def test_daily_rebalance_cancels_open_orders_first() -> None:
-    """Every daily run starts by clearing yesterday's stops."""
+def test_selective_cancel_preserves_manual_orders() -> None:
+    """T3.16 — orders WITHOUT our agent tag, on symbols we don't hold,
+    must NOT be cancelled by the daily rebalance."""
+    from types import SimpleNamespace
+
+    # Pre-stage open orders: one ours-tagged, one manual on a foreign symbol.
+    open_orders_db = [
+        SimpleNamespace(
+            id="agent-order-1",
+            client_order_id="qagent-oto-entry-AAPL-12345",
+            symbol="AAPL",
+            order_type=SimpleNamespace(value="market"),
+        ),
+        SimpleNamespace(
+            id="manual-order-1",
+            client_order_id="manual-trade-by-operator",
+            symbol="GOLD",   # symbol we don't trade
+            order_type=SimpleNamespace(value="limit"),
+        ),
+    ]
     client = _FakeTradingClient(equity=100_000)
+    client.get_orders = lambda **kw: list(open_orders_db)
+    cancelled_ids: list[str] = []
+    client.cancel_order_by_id = lambda oid: cancelled_ids.append(oid)
+
+    exec_ = AlpacaExecutor(trading_client=client)
+    n, err = exec_._cancel_agent_orders()
+    assert err is None
+    # Our tagged order cancelled; manual order preserved.
+    assert "agent-order-1" in cancelled_ids
+    assert "manual-order-1" not in cancelled_ids
+    assert n == 1
+
+
+def test_selective_cancel_catches_oto_child_stops_via_position_match() -> None:
+    """OTO child stops get broker-generated client_order_ids that we
+    can't tag. The fallback heuristic is: if it's a stop order on a
+    symbol we currently hold, treat it as one of ours."""
+    from types import SimpleNamespace
+
+    open_orders_db = [
+        SimpleNamespace(
+            id="oto-child-stop-1",
+            client_order_id="broker-generated-xyz",   # no agent tag
+            symbol="AAPL",                            # but we hold AAPL
+            order_type=SimpleNamespace(value="stop"),
+        ),
+        SimpleNamespace(
+            id="manual-stop-on-foreign-symbol",
+            client_order_id="manual-xyz",
+            symbol="TSLA",                            # we don't hold TSLA
+            order_type=SimpleNamespace(value="stop"),
+        ),
+    ]
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 10})
+    client.get_orders = lambda **kw: list(open_orders_db)
+    cancelled_ids: list[str] = []
+    client.cancel_order_by_id = lambda oid: cancelled_ids.append(oid)
+
+    exec_ = AlpacaExecutor(trading_client=client)
+    n, err = exec_._cancel_agent_orders()
+    assert err is None
+    # AAPL stop cancelled (we hold AAPL → it's our OTO child); TSLA
+    # stop preserved (we don't hold TSLA → it's the operator's).
+    assert "oto-child-stop-1" in cancelled_ids
+    assert "manual-stop-on-foreign-symbol" not in cancelled_ids
+    assert n == 1
+
+
+def test_kept_stop_failure_triggers_emergency_close() -> None:
+    """T3.14 — if the standalone stop submission fails for a kept
+    position, the executor MUST emergency-close the position rather
+    than leave it unprotected for 24 hours."""
+    # Simulate: AAPL is held + in targets at same qty; the stop
+    # submission raises; we expect a follow-up market sell.
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
+    # Make the FIRST submit raise (the stop arming). The SECOND submit
+    # (the emergency close) should succeed.
+    submit_count = [0]
+    original_submit = client.submit_order
+    def _submit_with_first_failure(req):
+        submit_count[0] += 1
+        if submit_count[0] == 1:
+            raise RuntimeError("simulated stop-arm rejection")
+        return original_submit(req)
+    client.submit_order = _submit_with_first_failure
+
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},    # → qty 50 (kept)
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+    )
+    # The stop_loss row should be marked failed; an entry row should
+    # show the emergency close as submitted (or failed, but trying).
+    stop_rows = [o for o in report.submitted_orders if o.role == "stop_loss"]
+    entry_close_rows = [
+        o for o in report.submitted_orders
+        if o.role == "entry" and o.side == "sell"
+        and o.error and "stop failed" in (o.error or "")
+    ]
+    # At least one failed stop-arm and one corresponding emergency close.
+    assert any(o.status == "failed" for o in stop_rows)
+    assert len(entry_close_rows) == 1, (
+        "Expected exactly one emergency close after stop-arm failure; "
+        f"got {len(entry_close_rows)}: {entry_close_rows}"
+    )
+
+
+def test_daily_rebalance_calls_selective_cancel_not_broad_cancel() -> None:
+    """T3.16 — the executor must use SELECTIVE cancellation (filter by
+    agent tag / position symbol) rather than the indiscriminate
+    cancel_orders() which would kill operator's manual orders too.
+
+    Regression guard: if anyone reverts to self._client.cancel_orders(),
+    this test screams.
+    """
+    client = _FakeTradingClient(equity=100_000)
+    # Track which broad-cancel calls happen.
+    cancel_orders_calls = 0
+    orig_cancel = client.cancel_orders
+    def _wrap():
+        nonlocal cancel_orders_calls
+        cancel_orders_calls += 1
+        orig_cancel()
+    client.cancel_orders = _wrap
+
     exec_ = AlpacaExecutor(trading_client=client)
     exec_.submit_daily_rebalance(
         target_weights={"AAPL": 0.1},
         signal_prices={"AAPL": 200.0},
         stop_loss_pct=0.05,
     )
-    assert client.cancel_calls == 1
+    # Selective path: get_orders() + cancel_order_by_id() per match.
+    # Broad cancel_orders() must NOT be called.
+    assert cancel_orders_calls == 0, (
+        f"Broad cancel_orders() called {cancel_orders_calls}x — "
+        "would kill operator's manual orders. Use _cancel_agent_orders."
+    )
 
 
 def test_daily_rebalance_dry_run_does_not_call_cancel_or_submit() -> None:

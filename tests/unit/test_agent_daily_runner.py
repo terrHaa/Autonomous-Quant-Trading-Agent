@@ -103,14 +103,22 @@ class _FakeExecutor:
         )
 
 
-def _make_bars(symbols: list[str], n_days: int = 100, *, trend: float = 0.5) -> pd.DataFrame:
+def _make_bars(
+    symbols: list[str], n_days: int = 100, *, trend: float = 0.5,
+    end_date: date | None = None,
+) -> pd.DataFrame:
     """Build a bars frame with n_days of business-day data.
 
     All symbols ramp UP by `trend` per day starting from base price 100.
     Since they all ramp at the same rate, momentum ranking is determined
     by base price differences (which we make distinct per symbol).
+
+    The latest bar is anchored to ``end_date`` (default: date(2024, 6, 2)
+    so it aligns with the historical `today=date(2024, 6, 3)` tests use
+    — staying within the run-time freshness window).
     """
-    days = pd.bdate_range("2024-01-02", periods=n_days, tz="UTC")
+    end = end_date or date(2024, 6, 2)
+    days = pd.bdate_range(end=pd.Timestamp(end, tz="UTC"), periods=n_days)
     rows, idx = [], []
     for i, sym in enumerate(symbols):
         base = 100.0 + i  # unique base so ranking is deterministic
@@ -287,6 +295,31 @@ def test_vol_target_returns_original_when_bars_unavailable() -> None:
 # ---------------------------------------------------------------------------
 # Kill switch (existing tests follow)
 # ---------------------------------------------------------------------------
+
+
+def test_run_daily_trade_refuses_stale_bars(
+    tmp_path: Path, _in_trade_window,
+) -> None:
+    """T3.18 — if the cached bars are too old (latest > 5 days from
+    today), the runner refuses to trade. Operational safety: signals
+    based on week-old data are worse than not trading at all.
+    """
+    # Build bars whose latest date is way before today.
+    universe = [f"SYM{i}" for i in range(5)]
+    bars = _make_bars(universe, n_days=30)
+    cache = _FakeCache(bars)
+    executor = _FakeExecutor()
+    # bars' latest date defaults to ~2024-01-30; "today" is far in the
+    # future → stale_days > 5 days.
+    far_future = date(2030, 1, 1)
+    with pytest.raises(RuntimeError, match="stale"):
+        daily_runner.run_daily_trade(
+            today=far_future,
+            universe=universe, cache=cache, executor=executor,
+            runs_dir=tmp_path,
+        )
+    # No record persisted.
+    assert not (tmp_path / f"{far_future.isoformat()}.json").exists()
 
 
 def test_sector_cap_trims_overweight_sector() -> None:

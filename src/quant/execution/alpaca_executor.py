@@ -214,9 +214,76 @@ class AlpacaExecutor:
     def env(self) -> Env:
         return self._env
 
+    # Prefix on every client_order_id we submit. Lets us identify our
+    # own orders at cancel time so we don't kill operator-placed manual
+    # orders sharing the same account.
+    _AGENT_TAG = "qagent"
+
     def get_equity(self) -> float:
         """Account equity (cash + mark-to-market positions) in USD."""
         return float(self._client.get_account().equity)
+
+    def _make_client_order_id(self, sym: str, role: str) -> str:
+        """Construct a tagged client_order_id for an order.
+
+        Format: ``qagent-{role}-{sym}-{epoch_ms}``. The ``qagent-``
+        prefix is the discriminator the cancel pass uses.
+        """
+        import time as _time
+        return f"{self._AGENT_TAG}-{role}-{sym}-{int(_time.time() * 1000)}"
+
+    def _cancel_agent_orders(self) -> tuple[int, str | None]:
+        """Cancel open orders the agent owns. Returns (n_cancelled, error).
+
+        Distinct from ``self._client.cancel_orders()`` which would cancel
+        EVERY open order on the account, including any manual orders the
+        operator placed. This version uses two heuristics combined:
+
+          1. ``client_order_id`` starts with the agent tag — catches every
+             order we DIRECTLY submitted (entries, kept-stops, repair
+             stops, close-outs).
+          2. Stop-type order on a symbol we currently hold — catches OTO
+             child stops where the broker generates the id and we can't
+             tag it from our side.
+
+        Manual orders OUTSIDE our held positions are preserved. Caveat:
+        if the operator places manual orders on the SAME symbols the
+        agent holds, those orders will be cancelled too. Document this
+        in the executor's docstring.
+        """
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            open_orders = self._client.get_orders(
+                filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500),
+            )
+        except Exception as e:
+            return 0, f"could not fetch open orders: {e}"
+
+        held_syms = set(self.get_positions().keys())
+        n_cancelled = 0
+        cancel_errors: list[str] = []
+        for o in open_orders:
+            client_id = getattr(o, "client_order_id", "") or ""
+            order_type = getattr(getattr(o, "order_type", None), "value", "")
+            sym = getattr(o, "symbol", "")
+            is_ours = (
+                client_id.startswith(self._AGENT_TAG)
+                or (order_type == "stop" and sym in held_syms)
+            )
+            if not is_ours:
+                continue
+            order_id = getattr(o, "id", None)
+            if order_id is None:
+                continue
+            try:
+                self._client.cancel_order_by_id(str(order_id))
+                n_cancelled += 1
+            except Exception as e:
+                cancel_errors.append(f"{sym}: {e}")
+        if cancel_errors:
+            return n_cancelled, "; ".join(cancel_errors[:5])
+        return n_cancelled, None
 
     def get_positions(self) -> dict[str, int]:
         """Current positions as ``{symbol: signed_qty}``.
@@ -471,24 +538,29 @@ class AlpacaExecutor:
         submitted: list[SubmittedOrder] = []
         max_notional = max_position_weight * equity
 
-        # ---- 1. Cancel all open orders. -----------------------------
+        # ---- 1. Cancel only OUR open orders. ------------------------
+        # T3.16: cancel_orders() was indiscriminate — it would kill any
+        # manual orders the operator placed. We now scan open orders
+        # and only cancel those tagged with our agent prefix in
+        # client_order_id. Manual orders (which have a different prefix
+        # or no prefix) are left alone.
+        #
         # Without this, yesterday's GTC stops would linger and double up
         # with today's. cancel_orders() is idempotent — no-op if nothing
         # is pending.
         if not dry_run:
-            try:
-                self._client.cancel_orders()
-            except Exception as e:
+            n_cancelled, cancel_err = self._cancel_agent_orders()
+            if cancel_err:
                 # Cancellation failure is bad but recoverable — log it
                 # on the report and proceed; the broker will refuse
                 # duplicate orders rather than silently double-fill.
                 submitted.append(SubmittedOrder(
-                    symbol="(all)",
+                    symbol="(agent-tagged)",
                     side="sell",
                     qty=0,
                     status="failed",
                     role="entry",
-                    error=f"cancel_orders failed: {e}",
+                    error=f"selective cancel failed: {cancel_err}",
                 ))
 
         # ---- 2. PLAN the day's actions, signal-driven ---------------
@@ -638,6 +710,7 @@ class AlpacaExecutor:
                     qty=abs(qty),
                     side=OrderSide.SELL if qty > 0 else OrderSide.BUY,
                     time_in_force=TimeInForce.DAY,
+                    client_order_id=self._make_client_order_id(sym, "close"),
                 )
                 resp = self._client.submit_order(req)
                 submitted.append(SubmittedOrder(
@@ -711,6 +784,7 @@ class AlpacaExecutor:
                         side=OrderSide.SELL,
                         time_in_force=TimeInForce.GTC,
                         stop_price=stop_price,
+                        client_order_id=self._make_client_order_id(sym, "kept-stop"),
                     )
                     resp = self._client.submit_order(req)
                     # No buy row: the position was not touched. Emit a
@@ -728,11 +802,51 @@ class AlpacaExecutor:
                         alpaca_order_id=str(getattr(resp, "id", None)),
                     ))
                 except Exception as e:
+                    # T3.14 — Stop-arm failure on a KEPT position means
+                    # the position is now unstopped (step 1 cancelled
+                    # yesterday's stop; we just failed to attach today's).
+                    # Rather than leave it unprotected until the next
+                    # day's audit catches it, close the position
+                    # immediately. Losing the position is preferable
+                    # to running it with no downside protection.
                     submitted.append(SubmittedOrder(
                         symbol=sym, side="sell", qty=target_qty,
                         status="failed", role="stop_loss",
-                        stop_price=stop_price, error=str(e),
+                        stop_price=stop_price,
+                        error=(
+                            f"stop submission failed: {e}; closing "
+                            "position to avoid unprotected exposure"
+                        ),
                     ))
+                    try:
+                        from alpaca.trading.enums import OrderSide, TimeInForce
+                        from alpaca.trading.requests import MarketOrderRequest
+                        close_req = MarketOrderRequest(
+                            symbol=sym, qty=target_qty,
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.DAY,
+                            client_order_id=self._make_client_order_id(sym, "forced-close"),
+                        )
+                        close_resp = self._client.submit_order(close_req)
+                        submitted.append(SubmittedOrder(
+                            symbol=sym, side="sell", qty=target_qty,
+                            status="submitted", role="entry",
+                            alpaca_order_id=str(getattr(close_resp, "id", None)),
+                            error="forced close — stop failed to arm",
+                        ))
+                    except Exception as close_err:
+                        # Both attempts failed. Audit will scream tomorrow
+                        # (unprotected position will be flagged). Best we
+                        # can do here is log loudly.
+                        submitted.append(SubmittedOrder(
+                            symbol=sym, side="sell", qty=target_qty,
+                            status="failed", role="entry",
+                            error=(
+                                f"BOTH stop AND close failed for {sym}; "
+                                "position is unprotected. Close manually. "
+                                f"close error: {close_err}"
+                            ),
+                        ))
                 continue
 
             # --- New entry OR resize: full OTO bracket (existing path).
@@ -768,6 +882,7 @@ class AlpacaExecutor:
                     time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.OTO,
                     stop_loss=StopLossRequest(stop_price=stop_price),
+                    client_order_id=self._make_client_order_id(sym, "oto-entry"),
                 )
                 resp = self._client.submit_order(req)
                 parent_id = str(getattr(resp, "id", None))
@@ -1035,12 +1150,17 @@ def _repair_oto_stops_to_fill_price(
         try:
             if child_stop_id:
                 client.cancel_order_by_id(child_stop_id)
+            # Tag with agent prefix so tomorrow's selective cancel
+            # picks this up (otherwise the repair stop is anonymous
+            # and would only be caught by the OTO-child heuristic).
+            import time as _time
             new_stop_req = StopOrderRequest(
                 symbol=sym,
                 qty=int(entry.qty),
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC,
                 stop_price=new_stop_price,
+                client_order_id=f"qagent-repair-{sym}-{int(_time.time() * 1000)}",
             )
             client.submit_order(new_stop_req)
             logger.info(

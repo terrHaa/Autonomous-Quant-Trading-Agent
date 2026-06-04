@@ -594,6 +594,22 @@ def run_daily_trade(
             f"between {start} and {end}. Cache or Alpaca issue?"
         )
 
+    # T3.18 — Bar freshness check. The cache could return STALE data
+    # (e.g. cache file not refreshed for a week, or Alpaca returned
+    # an old window). If the latest bar is more than 5 calendar days
+    # old, refuse to trade — the signals would be based on
+    # week-old data, which is operationally dangerous.
+    latest_bar_ts = bars.index.get_level_values("timestamp").max()
+    latest_bar_date = latest_bar_ts.date() if hasattr(latest_bar_ts, "date") else latest_bar_ts
+    stale_days = (today - latest_bar_date).days
+    if stale_days > 5:
+        raise RuntimeError(
+            f"Latest bar in cache is {stale_days} calendar days old "
+            f"(latest={latest_bar_date}, today={today}). Cache is stale; "
+            "refusing to trade on week-old signals. Check the bars cache "
+            "at data/bars/daily/ and re-fetch from Alpaca if needed."
+        )
+
     # --- 2a. Graduate any AI strategies whose shadow period has ended -------
     # Shadow strategies live in state.ai_strategy_shadow_until until the
     # ISO date there has passed. On the first daily run after that date,

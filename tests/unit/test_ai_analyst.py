@@ -428,7 +428,7 @@ def test_response_shape_documents_pipeline_findings() -> None:
 def test_analyze_passes_pipeline_snapshot_into_user_message() -> None:
     """When monthly_review passes a pipeline_snapshot, the user message
     must embed it AND tell the analyst to review it."""
-    from quant.agent.ai_analyst import PipelineFinding   # noqa: F401
+    from quant.agent.ai_analyst import PipelineFinding  # noqa: F401
     analyst, client = _analyst_with_capturing_client(
         '{"analysis": "x", "proposed_strategy": null, "pipeline_findings": []}'
     )
