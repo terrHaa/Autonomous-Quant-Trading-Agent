@@ -52,7 +52,7 @@ import argparse
 import logging
 import sys
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -83,6 +83,16 @@ _MAX_CHANGE_FRACTION = 0.10        # > 10% symmetric diff vs old → reject
 _DEFAULT_CSV_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "reference" / "universe" / "sp500.csv"
+)
+# T-audit fix H1: full-universe sector map. The sector concentration cap
+# in daily_runner used to read from sp500_top50.csv, covering only ~50 of
+# 519 universe names — the other 470 passed through the cap as "unknown
+# sector" → the cap was silently disabled for the bulk of the book. This
+# CSV maps every active member to its GICS sector so the cap actually
+# binds. Refreshed quarterly together with sp500.csv.
+_DEFAULT_SECTORS_CSV_PATH = (
+    Path(__file__).resolve().parent.parent.parent.parent
+    / "reference" / "universe" / "sp500_sectors.csv"
 )
 
 
@@ -148,6 +158,74 @@ def _normalise_current_table(df: pd.DataFrame) -> pd.DataFrame:
     return df[[sym_col, date_col]].rename(
         columns={sym_col: "symbol", date_col: "date_added"},
     )
+
+
+def _extract_sectors(df: pd.DataFrame) -> dict[str, str]:
+    """T-audit fix H1: pull {symbol: gics_sector} from the current-members
+    Wikipedia table.
+
+    The current-members table has a ``GICS Sector`` column for every
+    active S&P 500 member. We normalise column names the same way the
+    membership extractor does, then build a flat dict.
+
+    Returns an EMPTY dict (and logs) if the GICS column isn't found —
+    failure here should NOT block the membership refresh, since the
+    sector cap has a documented fallback to "unknown sector = pass
+    through unchanged".
+    """
+    df = df.copy()
+    df.columns = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
+    sym_col = next(
+        (c for c in ["symbol", "ticker", "ticker_symbol"] if c in df.columns),
+        None,
+    )
+    sector_col = next(
+        (c for c in df.columns if "gics" in c and "sector" in c
+         and "sub" not in c),
+        None,
+    )
+    if sym_col is None or sector_col is None:
+        logger.warning(
+            "extract_sectors: no GICS sector column in %s; "
+            "sectors map will be empty (sector cap effectively disabled)",
+            list(df.columns),
+        )
+        return {}
+    out: dict[str, str] = {}
+    for _, row in df.iterrows():
+        sym = str(row[sym_col]).upper().strip()
+        sector = str(row[sector_col]).strip()
+        if sym and sym != "NAN" and sector and sector != "NAN":
+            out[sym] = sector
+    return out
+
+
+def _write_sectors_csv(
+    sectors: dict[str, str],
+    out_path: Path,
+) -> None:
+    """Atomic write of the {symbol, sector} CSV with a provenance header."""
+    if not sectors:
+        return   # don't clobber a good existing file with an empty refresh
+    lines = [
+        "# S&P 500 GICS sector map.",
+        "#",
+        "# Auto-refreshed by quant-sp500-refresh from Wikipedia.",
+        f"# Last refreshed: {datetime.now(UTC).isoformat()}",
+        "#",
+        "# Used by daily_runner._apply_sector_cap to enforce the 30%",
+        "# per-sector concentration cap across the FULL universe.",
+        "#",
+        "symbol,sector",
+    ]
+    for sym in sorted(sectors):
+        # Quote sectors with commas (defensive — none of the 11 GICS
+        # sectors have commas today but it's cheap insurance).
+        sec = sectors[sym]
+        if "," in sec:
+            sec = f'"{sec}"'
+        lines.append(f"{sym},{sec}")
+    _atomic_write_text(out_path, "\n".join(lines) + "\n")
 
 
 def _normalise_changes_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -453,6 +531,7 @@ def _render_email(
 def refresh_sp500_universe(
     *,
     csv_path: Path | None = None,
+    sectors_csv_path: Path | None = None,
     email_sender: EmailSender | None = None,
     min_active: int = _MIN_ACTIVE_MEMBERS,
     max_change_fraction: float = _MAX_CHANGE_FRACTION,
@@ -462,13 +541,23 @@ def refresh_sp500_universe(
     Test-injectable: pass ``csv_path`` for an alt output, ``email_sender``
     for a fake, and tune ``min_active`` / ``max_change_fraction`` if a
     test needs to exercise the safety gates.
+
+    Writes TWO files on success:
+      - ``csv_path`` (default: reference/universe/sp500.csv) — the
+        membership history (symbol, added, removed).
+      - ``sectors_csv_path`` (default: reference/universe/sp500_sectors.csv)
+        — the full-universe GICS sector map used by the sector cap.
     """
     out_path = csv_path or _DEFAULT_CSV_PATH
+    sectors_out_path = sectors_csv_path or _DEFAULT_SECTORS_CSV_PATH
     sender = email_sender or EmailSender()
 
     try:
         current_raw, changes_raw = _fetch_wikipedia_tables()
         current = _normalise_current_table(current_raw)
+        # T-audit fix H1: extract sector map from the same current-members
+        # table (before normalisation drops non-(symbol, date) columns).
+        sectors = _extract_sectors(current_raw)
         changes = _normalise_changes_table(changes_raw)
         members = _build_membership(current, changes)
 
@@ -499,12 +588,28 @@ def refresh_sp500_universe(
             return False
 
         _write_csv(members, out_path)
+        # Write the sector map alongside. Failure here is logged but does
+        # NOT fail the membership refresh — the cap falls back to
+        # "unknown sector = pass through" so we degrade gracefully.
+        try:
+            _write_sectors_csv(sectors, sectors_out_path)
+            logger.info(
+                "sp500 refresh wrote sector map for %d names → %s",
+                len(sectors), sectors_out_path,
+            )
+        except Exception as sec_err:
+            logger.warning(
+                "sp500 refresh: failed to write sector map (%s); "
+                "membership file is still good",
+                sec_err,
+            )
         subj, body = _render_email(success=True, diff=diff)
         sender.send(subject=subj, body_text=body)
         logger.info(
-            "sp500 refresh SUCCESS: %d active (was %d); %+d net",
+            "sp500 refresh SUCCESS: %d active (was %d); %+d net; %d sectors",
             diff["new_active_count"], diff["old_active_count"],
             diff["new_active_count"] - diff["old_active_count"],
+            len(sectors),
         )
         return True
 

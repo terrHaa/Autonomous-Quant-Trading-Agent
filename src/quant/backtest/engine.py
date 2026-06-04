@@ -67,6 +67,7 @@ def run_backtest(
     config: Config,
     strategy: Strategy,
     bars: pd.DataFrame,
+    stop_loss_pct: float | None = 0.05,
 ) -> BacktestResult:
     """Run a full backtest.
 
@@ -82,6 +83,14 @@ def run_backtest(
         MultiIndex(symbol, timestamp) OHLCV DataFrame, as produced by the
         cache. Must satisfy the standard contract — run ``check_daily_bars``
         on it before calling this if you don't trust the source.
+    stop_loss_pct
+        T-audit fix C2: model a hard stop-loss at this distance below the
+        position's weighted-average entry price. Default 0.05 matches the
+        live agent's STOP_LOSS_PCT. Pass ``None`` to disable (legacy
+        behaviour — useful for testing strategies in isolation from the
+        risk overlay). Gap-through is modelled honestly: if today's open
+        is already below the stop, the fill is at the open (the gap is
+        not magically protected).
 
     Returns
     -------
@@ -100,6 +109,12 @@ def run_backtest(
     # ---- Initialize state ---------------------------------------------
     portfolio = Portfolio(starting_equity=config.backtest.starting_equity)
     queued_orders: list[Order] = []
+    # T-audit fix C2: weighted-average entry price per held symbol, used
+    # to compute the per-position stop level. Updated on every buy fill
+    # (add-on positions get a proper weighted average) and cleared when
+    # the symbol goes flat.
+    entry_price: dict[str, float] = {}
+    n_stop_outs = 0   # surfaced in metadata so the operator sees if stops fire often
 
     # Recording accumulators. Each list grows by one row per matching event.
     equity_by_date: dict[date, float] = {}
@@ -124,7 +139,25 @@ def run_backtest(
                 costs_cfg=config.backtest.costs,
             )
             if fill is not None:
+                # T-audit fix C2: maintain weighted-average entry price
+                # for the stop check below. Buy fills add to the basis;
+                # sell fills that flat the symbol clear it.
+                prev_qty = portfolio.positions.get(fill.symbol, 0)
                 portfolio.apply_fill(fill)
+                new_qty = portfolio.positions.get(fill.symbol, 0)
+                if fill.side == "buy" and new_qty > 0:
+                    if prev_qty <= 0:
+                        # Fresh entry (or short cover into long).
+                        entry_price[fill.symbol] = fill.fill_price
+                    else:
+                        # Add-on — weight by share count.
+                        prev_basis = entry_price.get(fill.symbol, fill.fill_price)
+                        entry_price[fill.symbol] = (
+                            (prev_basis * prev_qty + fill.fill_price * fill.qty)
+                            / new_qty
+                        )
+                elif new_qty == 0:
+                    entry_price.pop(fill.symbol, None)
                 fill_records.append(_fill_to_dict(fill))
             else:
                 # No fill today. Decide based on time-in-force.
@@ -132,6 +165,45 @@ def run_backtest(
                     still_queued.append(order)
                 # DAY: drop the order silently.
         queued_orders = still_queued
+
+        # ---- 1b. STOP-LOSS CHECK (T-audit fix C2) ----------------------
+        # For each long position with a known entry price, the stop fires
+        # if today's LOW touches stop_price = entry × (1 - stop_loss_pct).
+        # Fill at the stop_price unless today's OPEN is already below
+        # (gap-through), in which case fill at the open — the gap was
+        # not magically protected. Models the real-world worst case.
+        if stop_loss_pct is not None and stop_loss_pct > 0:
+            stopped_out: list[tuple[str, int, float]] = []
+            for sym, qty in portfolio.positions.items():
+                if qty <= 0:
+                    continue   # shorts use a different stop direction; skip
+                basis = entry_price.get(sym)
+                if basis is None:
+                    continue
+                try:
+                    lo = lows.at[bar_date, sym]
+                    op = opens.at[bar_date, sym]
+                except KeyError:
+                    continue
+                if pd.isna(lo) or pd.isna(op):
+                    continue
+                stop_level = basis * (1.0 - stop_loss_pct)
+                if float(lo) <= stop_level:
+                    # Fill at stop_level OR open if the open gapped through.
+                    fill_px = min(float(op), stop_level)
+                    stopped_out.append((sym, qty, fill_px))
+            for sym, qty, fill_px in stopped_out:
+                stop_fill = _synthesize_stop_fill(
+                    bar_date=bar_date,
+                    symbol=sym,
+                    qty=qty,
+                    fill_price=fill_px,
+                    costs_cfg=config.backtest.costs,
+                )
+                portfolio.apply_fill(stop_fill)
+                fill_records.append(_fill_to_dict(stop_fill))
+                entry_price.pop(sym, None)
+                n_stop_outs += 1
 
         # ---- 2. MARK: revalue held positions at today's close ---------
         # We only mark held names — other entries in `closes` row are
@@ -181,6 +253,8 @@ def run_backtest(
         fill_records=fill_records,
         trading_dates=trading_dates,
         run_time_s=time.perf_counter() - t_start,
+        n_stop_outs=n_stop_outs,
+        stop_loss_pct=stop_loss_pct,
     )
 
 
@@ -420,6 +494,38 @@ def _fill_to_dict(f: Fill) -> dict[str, Any]:
     }
 
 
+def _synthesize_stop_fill(
+    *,
+    bar_date: date,
+    symbol: str,
+    qty: int,
+    fill_price: float,
+    costs_cfg,
+) -> Fill:
+    """T-audit fix C2: build a Fill that matches what the live executor's
+    GTC stop-loss order would have produced.
+
+    Costs: we charge commission_bps (paid on every fill) but NO spread or
+    slippage — a real stop triggers and converts to a market-on-touch
+    order; the spread is real but it's already implicit in the fact that
+    fill_price is the stop level (operator gets the bid, not the mid).
+    Modelling extra slippage here would double-count.
+    """
+    notional = qty * fill_price
+    commission = notional * costs_cfg.commission_bps / 10_000
+    return Fill(
+        date=bar_date,
+        symbol=symbol,
+        side="sell",
+        qty=qty,
+        fill_price=fill_price,
+        notional=notional,
+        spread_cost=0.0,
+        slippage_cost=0.0,
+        commission=commission,
+    )
+
+
 def _assemble_result(
     *,
     config: Config,
@@ -431,6 +537,8 @@ def _assemble_result(
     fill_records: list[dict[str, Any]],
     trading_dates: list[date],
     run_time_s: float,
+    n_stop_outs: int = 0,
+    stop_loss_pct: float | None = None,
 ) -> BacktestResult:
     """Convert per-day accumulators into the final ``BacktestResult``."""
 
@@ -498,6 +606,12 @@ def _assemble_result(
             if len(equity_curve) and pd.notna(equity_curve.iloc[-1])
             else config.backtest.starting_equity
         ),
+        # T-audit fix C2: surface how the stop overlay behaved. Operators
+        # can compare across candidates — a strategy with >20% of fills
+        # being forced stop-outs is fundamentally less reliable than one
+        # whose stops rarely fire even after the same Sharpe.
+        "n_stop_outs": n_stop_outs,
+        "stop_loss_pct": stop_loss_pct,
     }
 
     return BacktestResult(

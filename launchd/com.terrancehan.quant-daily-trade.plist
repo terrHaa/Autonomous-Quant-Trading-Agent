@@ -9,9 +9,15 @@
   Mac is on CST (+0800). 21:35 CST same day maps to:
     - 09:35 EDT (summer, US-DST): 5 min after market open. Ideal.
     - 08:35 EST (winter, no-DST): 55 min before market open. Orders
-      submitted then queue at Alpaca and fill at the opening cross —
-      acceptable (we only submit market orders + OTO stops, all of
-      which fill at open or near-open prices either way).
+      queue at Alpaca and fill at the opening cross — acceptable
+      (we only submit market orders + OTO stops, all of which fill
+      at open or near-open prices either way).
+
+  Both cases land inside the agent's 08:00–15:35 ET trade-window
+  guard (see daily_runner._outside_trade_window). The 08:00 ET floor
+  was deliberately chosen to admit the winter pre-market fire; an
+  earlier 09:00 ET floor (legacy) silently disabled trading for the
+  ~5 winter months until the 2026 audit caught it.
 
   TZ note for the next maintainer: this plist's schedule is hardcoded
   for CST. If you move the Mac to a different timezone, edit the

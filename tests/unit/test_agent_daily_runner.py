@@ -544,7 +544,7 @@ def test_outside_trade_window_inside_returns_false(monkeypatch) -> None:
 
 
 def test_outside_trade_window_too_early_returns_true(monkeypatch) -> None:
-    """05:00 ET on the trade date is BEFORE the 09:00 window open → out."""
+    """05:00 ET on the trade date is BEFORE the 08:00 window open → out."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -558,6 +558,31 @@ def test_outside_trade_window_too_early_returns_true(monkeypatch) -> None:
     _dt.datetime = _FakeDatetime   # type: ignore[misc]
     try:
         assert daily_runner._outside_trade_window(date(2024, 6, 3)) is True
+    finally:
+        _dt.datetime = real_dt   # type: ignore[misc]
+
+
+def test_outside_trade_window_winter_pre_market_is_inside(monkeypatch) -> None:
+    """T-audit fix: 08:35 ET (CST 21:35 in US winter) must be IN the window.
+
+    Regression for the winter-TZ bug — the legacy 09:00 ET floor silently
+    disabled trading from Nov-Mar each year when the China-CST launchd
+    fire landed at 08:35 ET. The 08:00 ET floor admits pre-market submit.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            # 08:35 ET on a trading day — the winter-CST fire point.
+            return datetime(2024, 12, 3, 8, 35, tzinfo=ZoneInfo("America/New_York"))
+
+    import datetime as _dt
+    real_dt = _dt.datetime
+    _dt.datetime = _FakeDatetime   # type: ignore[misc]
+    try:
+        assert daily_runner._outside_trade_window(date(2024, 12, 3)) is False
     finally:
         _dt.datetime = real_dt   # type: ignore[misc]
 

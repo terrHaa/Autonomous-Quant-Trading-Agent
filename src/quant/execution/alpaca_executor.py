@@ -637,24 +637,43 @@ class AlpacaExecutor:
                 )
             stop_price = round(stop_anchor * (1.0 - stop_dist), 2)
 
-            # Notional-cap defense (operator's 20% rule).
+            # Notional-cap defense (operator's 20% rule). T-audit fix H6:
+            # the legacy behaviour REFUSED the entry when notional > cap,
+            # so high-conviction signals (e.g., xsec's top-momentum name
+            # × HRP > 20%) were silently DROPPED. Now we TRIM target_qty
+            # down to the cap and continue — the strongest signal still
+            # gets allocation, just bounded by the operator's per-name
+            # rule. Refusal happens only when even one share exceeds the
+            # cap (a single-share-priced-above-cap name; effectively
+            # impossible at realistic equity levels but kept as a guard).
             entry_notional = target_qty * price
             if entry_notional > max_notional:
-                plans[sym] = {
-                    "action": "refused",
-                    "target_qty": target_qty,
-                    "stop_price": stop_price,
-                    "signal_price": price,
-                    "error": (
-                        f"refusing entry: notional ${entry_notional:,.2f} "
-                        f"exceeds max_position_weight × equity = "
-                        f"${max_notional:,.2f}"
-                    ),
-                }
-                # If we currently hold it, also close (don't maintain).
-                if current_qty > 0:
-                    stale_positions[sym] = current_qty
-                continue
+                trimmed_qty = int(max_notional / price)
+                if trimmed_qty <= 0:
+                    # Single share already exceeds the cap (price > max_notional).
+                    # Refuse the entry; no way to size into it under policy.
+                    plans[sym] = {
+                        "action": "refused",
+                        "target_qty": target_qty,
+                        "stop_price": stop_price,
+                        "signal_price": price,
+                        "error": (
+                            f"refusing entry: single share at ${price:,.2f} "
+                            f"already exceeds max_position_weight × equity = "
+                            f"${max_notional:,.2f}"
+                        ),
+                    }
+                    if current_qty > 0:
+                        stale_positions[sym] = current_qty
+                    continue
+                logger.info(
+                    "cap-trim: %s notional $%.2f > cap $%.2f; trimming "
+                    "qty %d → %d (notional $%.2f)",
+                    sym, entry_notional, max_notional,
+                    target_qty, trimmed_qty, trimmed_qty * price,
+                )
+                target_qty = trimmed_qty
+                entry_notional = target_qty * price
 
             # Forced exit: trail-stop would fire immediately. Close existing
             # position if any; don't re-enter.

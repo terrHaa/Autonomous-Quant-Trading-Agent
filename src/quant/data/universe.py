@@ -232,17 +232,34 @@ def load_active_universe(as_of: date, *, fallback_log: bool = True) -> list[str]
 
 
 def load_sector_map() -> dict[str, str]:
-    """Return ``{symbol: sector}`` for every name in the top-50 snapshot.
+    """Return ``{symbol: sector}`` covering every active S&P 500 name.
 
-    Reads the ``sector`` column from ``reference/universe/sp500_top50.csv``.
-    Used by the daily-trade routine to enforce the per-sector concentration
-    cap (no more than N% of the book in any single GICS sector).
+    T-audit fix H1: prefers ``reference/universe/sp500_sectors.csv``,
+    which is auto-refreshed quarterly by ``quant-sp500-refresh`` and
+    covers the full ~500-name universe. Falls back to the legacy
+    ``sp500_top50.csv`` only if the full file isn't there yet (i.e.,
+    on a system that hasn't run the refresh since this fix landed).
 
-    Names not in the snapshot don't appear in the returned dict — the
-    cap logic treats them as "unknown sector" and leaves their weight
-    alone. Add new tickers + their sectors to the CSV when you expand
-    the universe.
+    Used by the daily-trade routine to enforce the per-sector
+    concentration cap (no more than N% of the book in any single
+    GICS sector). Without the full file, the cap silently disabled
+    itself for the ~470 names outside the top-50 snapshot.
+
+    Names absent from the returned dict are treated by the cap as
+    "unknown sector" and pass through unchanged.
     """
+    # Prefer the full-universe file.
+    full_path = _REFERENCE_DIR / "sp500_sectors.csv"
+    if full_path.exists():
+        df = pd.read_csv(full_path, comment="#")
+        if "symbol" in df.columns and "sector" in df.columns:
+            return {
+                s.upper().strip(): sec.strip()
+                for s, sec in zip(df["symbol"], df["sector"], strict=False)
+                if isinstance(s, str) and isinstance(sec, str)
+            }
+
+    # Fallback: legacy top-50 file (covers ~10% of the universe).
     csv_path = _REFERENCE_DIR / "sp500_top50.csv"
     if not csv_path.exists():
         return {}
@@ -250,7 +267,7 @@ def load_sector_map() -> dict[str, str]:
     if "symbol" not in df.columns or "sector" not in df.columns:
         return {}
     return {
-        s.upper().strip(): sec
+        s.upper().strip(): sec.strip()
         for s, sec in zip(df["symbol"], df["sector"], strict=False)
         if isinstance(s, str) and isinstance(sec, str)
     }

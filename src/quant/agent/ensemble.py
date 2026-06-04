@@ -91,9 +91,21 @@ class EnsembleState:
     sma_slow: int = 200
 
     # Mean reversion params.
+    #
+    # T-audit fix H2: vol_normalize / vol_window / vol_multiplier were
+    # CONSTRUCTOR ARGUMENTS in MeanReversion that defaulted ON but were
+    # NEVER persisted in EnsembleState. The strategy's .name encodes
+    # them (e.g., ``mean_reversion_5_200bp_vol20x1.5``), so HRP keys
+    # depend on them. If someone toggled the constructor default the
+    # name would change and HRP would silently route 0 weight to MR.
+    # Promoting them here makes the routing-by-name contract honest:
+    # what's in EnsembleState fully determines the strategy NAME.
     mr_lookback: int = 5
     mr_threshold_pct: float = 0.02
     mr_allow_short: bool = False
+    mr_vol_normalize: bool = True
+    mr_vol_window: int = 20
+    mr_vol_multiplier: float = 1.5
 
     # Cross-sectional momentum params.
     xsec_top_k: int = 10
@@ -223,6 +235,12 @@ def build_strategies(state: EnsembleState, universe: list[str]) -> list[Strategy
             lookback=state.mr_lookback,
             threshold_pct=state.mr_threshold_pct,
             allow_short=state.mr_allow_short,
+            # T-audit fix H2: vol-normalize knobs are now fully driven
+            # by EnsembleState so the strategy NAME (which HRP keys on)
+            # is a pure function of persisted state.
+            vol_normalize=state.mr_vol_normalize,
+            vol_window=state.mr_vol_window,
+            vol_multiplier=state.mr_vol_multiplier,
         ),
         CrossSectionalMomentum(
             universe,

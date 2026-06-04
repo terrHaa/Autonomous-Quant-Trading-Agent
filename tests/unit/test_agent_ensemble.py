@@ -8,6 +8,7 @@ without running real backtests.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +75,48 @@ def test_build_strategies_returns_three_with_distinct_names() -> None:
     assert len(names) == 3
     # The default HRP weights' keys must MATCH the actual strategy names.
     assert set(state.hrp_weights.keys()) == names
+
+
+def test_mr_vol_normalize_off_changes_strategy_name(tmp_path: Path) -> None:
+    """T-audit fix H2: MR vol-normalize knobs are now persisted in
+    EnsembleState. Toggling them changes the strategy NAME — and that
+    fact is now VISIBLE because the operator must edit EnsembleState
+    (not a buried constructor default) to make the change. This
+    regression test locks in the contract that state drives name.
+    """
+    universe = [f"SYM{i}" for i in range(10)]
+    # Default: vol-normalize ON → name has _vol20x1.5 suffix.
+    on_state = EnsembleState()
+    on_strats = build_strategies(on_state, universe)
+    mr_on_name = next(s.name for s in on_strats if "mean_reversion" in s.name)
+    assert "vol20x1.5" in mr_on_name
+
+    # Off: vol-normalize disabled → name has no vol suffix.
+    off_state = replace(on_state, mr_vol_normalize=False)
+    off_strats = build_strategies(off_state, universe)
+    mr_off_name = next(s.name for s in off_strats if "mean_reversion" in s.name)
+    assert "vol" not in mr_off_name
+    # And the two names are distinct so HRP routing sees them as different
+    # strategies (which is what we want — the operator must consciously
+    # update hrp_weights when changing this knob).
+    assert mr_on_name != mr_off_name
+
+
+def test_mr_vol_params_round_trip_through_state(tmp_path: Path) -> None:
+    """EnsembleState now persists mr_vol_normalize / mr_vol_window /
+    mr_vol_multiplier; reload must recover them exactly."""
+    state = EnsembleState(
+        mr_vol_normalize=True,
+        mr_vol_window=30,
+        mr_vol_multiplier=2.0,
+    )
+    p = tmp_path / "ensemble_state.json"
+    from quant.agent.ensemble import load_ensemble_state, save_ensemble_state
+    save_ensemble_state(state, path=p)
+    loaded = load_ensemble_state(path=p)
+    assert loaded.mr_vol_normalize is True
+    assert loaded.mr_vol_window == 30
+    assert loaded.mr_vol_multiplier == 2.0
 
 
 # ---------------------------------------------------------------------------

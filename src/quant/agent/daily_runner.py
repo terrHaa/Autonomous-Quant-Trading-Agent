@@ -173,25 +173,34 @@ def _market_is_closed_today(today: date, executor: Any = None) -> tuple[bool, st
 
 def _outside_trade_window(today_iso_date: date) -> bool:
     """True iff current US/Eastern wall clock is NOT inside the trade window
-    for today_iso_date. The window is 09:00–15:35 ET on the trade day.
+    for today_iso_date. The window is 08:00–15:35 ET on the trade day.
 
     This guard covers BOTH ends:
 
-    - Before 09:00 ET: an off-schedule launchd KeepAlive fire (which can
+    - Before 08:00 ET: an off-schedule launchd KeepAlive fire (which can
       happen on plist reload — "never ran" satisfies "not SuccessfulExit")
       would otherwise trade at e.g. 23:00 ET the previous evening. The
       orders would just queue overnight at the broker; functionally OK,
       but wastes idempotency budget and clobbers any state the operator
       might want to inspect before market open. Cleaner to no-op and let
-      the scheduled 09:35 ET fire do its job.
+      the scheduled fire do its job.
 
     - After 15:35 ET: KeepAlive kill switch. If the trade has been failing
       for 6+ hours after the scheduled fire, the trade window is too close
       to the close to safely rebalance. Stop retrying; tomorrow's
       scheduled fire will resume normally.
 
+    Why 08:00 ET (not 09:00 ET): launchd fires the plist at 21:35 CST.
+    In US summer (EDT, UTC-4) that maps to 09:35 ET — 5 min after open,
+    ideal. In US winter (EST, UTC-5) it maps to 08:35 ET — 55 min before
+    open. With a 09:00 ET floor the agent would refuse to trade for
+    ~5 months/year (Nov–Mar). With 08:00 ET the winter fire is in-window
+    and orders queue at Alpaca, filling at the opening cross. Market
+    orders + OTO stops behave the same whether submitted at 08:35 ET
+    or 09:35 ET because they execute against the open auction.
+
     Returns False (i.e. "we're in the window, please trade") for now_ET
-    on the same calendar date as today_iso_date, between 09:00 and 15:35.
+    on the same calendar date as today_iso_date, between 08:00 and 15:35.
     """
     from datetime import datetime, time
     from zoneinfo import ZoneInfo
@@ -199,9 +208,10 @@ def _outside_trade_window(today_iso_date: date) -> bool:
     now_et = datetime.now(et)
     if now_et.date() != today_iso_date:
         # Date doesn't match today's date in ET → out of window
-        # (e.g. CST evening before market open in ET).
+        # (e.g. retry past CST midnight where today=CST-tomorrow but
+        # ET wall is still the original trade day).
         return True
-    window_open = time(9, 0)
+    window_open = time(8, 0)
     window_close = time(9 + _TRADE_DEADLINE_HOURS_AFTER_OPEN, 35)   # 15:35 ET
     return not (window_open <= now_et.time() <= window_close)
 
@@ -546,7 +556,21 @@ def run_daily_trade(
         Override "today's date" (default: system date). Useful for
         re-running a missed day or simulating ahead.
     """
-    today = today or date.today()
+    # T-audit fix H4: compute "today" from the ET wall clock, not the
+    # system clock. The agent trades US markets; the trade day must be
+    # the ET calendar day. The system clock is China-CST and at CST 21:35
+    # equals the same ET date in both summer (09:35 EDT) and winter
+    # (08:35 EST). BUT — if the launchd KeepAlive retries past CST
+    # midnight (e.g., 00:30 CST Tue after a 21:35 CST Mon failure), the
+    # system date jumps to Tue while the ET wall is still Mon 11:30 ET
+    # (mid-trade-window). With system-local date.today() we'd compute
+    # today=Tue, then _outside_trade_window compares Tue (today) vs Mon
+    # (now_et.date()) and bails. ET-anchored today() prevents this:
+    # both today and now_et.date() are Mon, retry proceeds correctly.
+    if today is None:
+        from datetime import datetime as _datetime
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        today = _datetime.now(tz=_ZoneInfo("America/New_York")).date()
     config = config or load_config()
 
     # --- 0. Idempotency + deadline guards (BEFORE expensive work) ---
@@ -644,6 +668,17 @@ def run_daily_trade(
             f"no bars fetched for universe of {len(universe)} symbols "
             f"between {start} and {end}. Cache or Alpaca issue?"
         )
+
+    # T-audit fix H9 — Structural integrity check. Validates the
+    # standard bars contract: columns/index shape, no nulls, OHLC
+    # invariants, no duplicate (symbol, timestamp), no weekend or
+    # future timestamps, prices > 0. Without this a single bad bar
+    # (negative price from a data outage, duplicate row from a cache
+    # merge bug, future timestamp from a clock-skewed fetch) would
+    # silently propagate through strategies and produce wrong signals.
+    # Cheap: O(rows) with vectorised numpy ops.
+    from quant.data.integrity import check_daily_bars
+    check_daily_bars(bars)
 
     # T3.18 — Bar freshness check. The cache could return STALE data
     # (e.g. cache file not refreshed for a week, or Alpaca returned
@@ -844,6 +879,9 @@ def run_daily_trade(
                 "mr_lookback": state.mr_lookback,
                 "mr_threshold_pct": state.mr_threshold_pct,
                 "mr_allow_short": state.mr_allow_short,
+                "mr_vol_normalize": state.mr_vol_normalize,
+                "mr_vol_window": state.mr_vol_window,
+                "mr_vol_multiplier": state.mr_vol_multiplier,
                 "xsec_top_k": state.xsec_top_k,
                 "xsec_lookback": state.xsec_lookback,
                 "xsec_skip": state.xsec_skip,

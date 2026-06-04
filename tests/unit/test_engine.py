@@ -349,3 +349,64 @@ def test_engine_is_deterministic() -> None:
     pd.testing.assert_series_equal(r1.equity_curve, r2.equity_curve)
     pd.testing.assert_frame_equal(r1.positions, r2.positions)
     pd.testing.assert_frame_equal(r1.fills, r2.fills)
+
+
+# ----------------------------------------------------------------------------
+# T-audit fix C2 — stop-loss overlay
+# ----------------------------------------------------------------------------
+
+
+def test_stop_loss_fires_when_low_breaches_5pct_below_entry() -> None:
+    """A long position held through a 10% drop must be stopped out at 5%."""
+    # Buy at day 0 open ($100), hold for a few bars, then bar 3 prints
+    # a low at $90 (10% below entry) — stop at $95 must fire.
+    closes = {"AAPL": [100.0, 100.0, 100.0, 90.0, 90.0]}
+    bars = _bars(["AAPL"], closes, spread_pct=0.0)
+    # Force bar 3's LOW to be $90 so it pierces the $95 stop.
+    bars.loc[("AAPL", bars.index.get_level_values("timestamp")[3]), "low"] = 90.0
+    bars.loc[("AAPL", bars.index.get_level_values("timestamp")[3]), "open"] = 96.0
+    config = _zero_cost_config()
+    result = run_backtest(
+        config=config, strategy=_BuyAndHold("AAPL"), bars=bars,
+        stop_loss_pct=0.05,
+    )
+    # At least one sell fill should appear from the stop overlay.
+    sells = result.fills[result.fills["side"] == "sell"]
+    assert len(sells) >= 1, "stop didn't fire even though low broke through"
+    # Fill price = stop level $95 (open of $96 didn't gap below).
+    assert (sells["fill_price"].iloc[0] - 95.0) < 1e-6
+    # Metadata surfaces the stop-out count.
+    assert result.metadata["n_stop_outs"] >= 1
+    assert result.metadata["stop_loss_pct"] == 0.05
+
+
+def test_stop_loss_gap_through_fills_at_open_not_stop_level() -> None:
+    """If the open gaps below the stop, fill at the open — gaps are real."""
+    closes = {"AAPL": [100.0, 100.0, 80.0, 80.0]}
+    bars = _bars(["AAPL"], closes, spread_pct=0.0)
+    # Bar 2: open and low both at $80 — gapped through the $95 stop level.
+    bars.loc[("AAPL", bars.index.get_level_values("timestamp")[2]), "open"] = 80.0
+    bars.loc[("AAPL", bars.index.get_level_values("timestamp")[2]), "low"] = 80.0
+    config = _zero_cost_config()
+    result = run_backtest(
+        config=config, strategy=_BuyAndHold("AAPL"), bars=bars,
+        stop_loss_pct=0.05,
+    )
+    sells = result.fills[result.fills["side"] == "sell"]
+    assert len(sells) >= 1
+    # Fill at the open of $80 (the gap), not at the $95 stop level.
+    assert sells["fill_price"].iloc[0] == 80.0
+
+
+def test_stop_loss_disabled_when_pct_is_none() -> None:
+    """Pass-through behaviour: stop=None disables the overlay (legacy)."""
+    closes = {"AAPL": [100.0, 100.0, 80.0, 80.0]}
+    bars = _bars(["AAPL"], closes, spread_pct=0.0)
+    config = _zero_cost_config()
+    result = run_backtest(
+        config=config, strategy=_BuyAndHold("AAPL"), bars=bars,
+        stop_loss_pct=None,
+    )
+    # No forced stop-out fills.
+    assert result.metadata["n_stop_outs"] == 0
+    assert result.metadata["stop_loss_pct"] is None

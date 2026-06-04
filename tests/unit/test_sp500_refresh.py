@@ -15,12 +15,14 @@ import pandas as pd
 from quant.agent.sp500_refresh import (
     _build_membership,
     _diff_against_existing,
+    _extract_sectors,
     _normalise_changes_table,
     _normalise_current_table,
     _parse_date,
     _render_email,
     _validate_membership,
     _write_csv,
+    _write_sectors_csv,
     refresh_sp500_universe,
 )
 
@@ -319,3 +321,97 @@ def test_write_csv_round_trips_via_pandas(tmp_path: Path) -> None:
     df = pd.read_csv(out, comment="#")
     assert "symbol" in df.columns and "added" in df.columns and "removed" in df.columns
     assert set(df["symbol"]) == {"AAPL", "OLDCO"}
+
+
+# ---------------------------------------------------------------------------
+# T-audit fix H1 — full-universe sector map
+# ---------------------------------------------------------------------------
+
+
+def test_extract_sectors_picks_up_gics_column() -> None:
+    """Wikipedia's current-members table has a GICS Sector column; we want it."""
+    raw = pd.DataFrame({
+        "Symbol": ["AAPL", "MSFT", "JPM"],
+        "GICS Sector": ["Information Technology", "Information Technology",
+                        "Financials"],
+        "Date added": ["1982-11-30", "1994-06-01", "1975-06-30"],
+    })
+    sectors = _extract_sectors(raw)
+    assert sectors == {
+        "AAPL": "Information Technology",
+        "MSFT": "Information Technology",
+        "JPM": "Financials",
+    }
+
+
+def test_extract_sectors_returns_empty_when_no_gics_column() -> None:
+    """Graceful failure: no GICS column → empty dict + log (no exception)."""
+    raw = pd.DataFrame({
+        "Symbol": ["AAPL"],
+        "Date added": ["1982-11-30"],
+    })
+    assert _extract_sectors(raw) == {}
+
+
+def test_extract_sectors_skips_gics_sub_industry() -> None:
+    """Wikipedia also has a 'GICS Sub-Industry' column. We want SECTOR, not sub-industry."""
+    raw = pd.DataFrame({
+        "Symbol": ["AAPL"],
+        "GICS Sector": ["Information Technology"],
+        "GICS Sub-Industry": ["Technology Hardware, Storage & Peripherals"],
+    })
+    sectors = _extract_sectors(raw)
+    assert sectors == {"AAPL": "Information Technology"}
+
+
+def test_write_sectors_csv_round_trips(tmp_path: Path) -> None:
+    """The written sector CSV must be readable as (symbol, sector)."""
+    sectors = {
+        "AAPL": "Information Technology",
+        "JPM": "Financials",
+    }
+    out = tmp_path / "sp500_sectors.csv"
+    _write_sectors_csv(sectors, out)
+    df = pd.read_csv(out, comment="#")
+    assert set(df.columns) >= {"symbol", "sector"}
+    rows = dict(zip(df["symbol"], df["sector"], strict=False))
+    assert rows == sectors
+
+
+def test_write_sectors_csv_skips_empty_input(tmp_path: Path) -> None:
+    """Don't clobber an existing good file with an empty refresh."""
+    out = tmp_path / "sp500_sectors.csv"
+    out.write_text("# existing\nsymbol,sector\nAAPL,Tech\n")
+    _write_sectors_csv({}, out)
+    # File unchanged.
+    assert "AAPL,Tech" in out.read_text()
+
+
+def test_load_sector_map_prefers_full_file(tmp_path: Path, monkeypatch) -> None:
+    """T-audit fix H1: when sp500_sectors.csv exists, it shadows the top-50 file."""
+    from quant.data import universe
+    monkeypatch.setattr(universe, "_REFERENCE_DIR", tmp_path)
+    # Write a "top-50" fallback with 1 name.
+    (tmp_path / "sp500_top50.csv").write_text("symbol,sector\nAAPL,Tech\n")
+    # And a "full" file with 3 names.
+    (tmp_path / "sp500_sectors.csv").write_text(
+        "symbol,sector\n"
+        "AAPL,Information Technology\n"
+        "JPM,Financials\n"
+        "XOM,Energy\n"
+    )
+    m = universe.load_sector_map()
+    assert m == {
+        "AAPL": "Information Technology",
+        "JPM": "Financials",
+        "XOM": "Energy",
+    }
+
+
+def test_load_sector_map_falls_back_when_full_file_missing(tmp_path: Path, monkeypatch) -> None:
+    """When sp500_sectors.csv doesn't exist, fall back to legacy top-50 file."""
+    from quant.data import universe
+    monkeypatch.setattr(universe, "_REFERENCE_DIR", tmp_path)
+    (tmp_path / "sp500_top50.csv").write_text("symbol,sector\nAAPL,Tech\n")
+    m = universe.load_sector_map()
+    assert m == {"AAPL": "Tech"}

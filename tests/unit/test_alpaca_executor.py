@@ -479,12 +479,16 @@ def test_daily_rebalance_emits_entry_and_stop_loss_rows() -> None:
     assert stop_row.stop_price == 190.0
 
 
-def test_daily_rebalance_refuses_oversize_orders() -> None:
-    """The 20%-of-equity per-trade cap is enforced as a HARD refusal,
-    even if the upstream target weight implies a larger notional."""
+def test_daily_rebalance_trims_oversize_orders_to_cap() -> None:
+    """T-audit fix H6: the 20%-of-equity per-trade cap TRIMS the order
+    quantity rather than refusing it. The original behaviour silently
+    dropped high-conviction signals (e.g., xsec's top-momentum name ×
+    HRP > 20% cap) → strongest bets got zero allocation. Now we cap
+    the qty and the bet still ships, just bounded by policy.
+    """
     client = _FakeTradingClient(equity=100_000)
     exec_ = AlpacaExecutor(trading_client=client)
-    # Target 30% in AAPL — exceeds 20% default cap.
+    # Target 30% in AAPL — exceeds 20% default cap; gets trimmed to 20%.
     report = exec_.submit_daily_rebalance(
         target_weights={"AAPL": 0.30},
         signal_prices={"AAPL": 200.0},
@@ -492,9 +496,43 @@ def test_daily_rebalance_refuses_oversize_orders() -> None:
         max_position_weight=0.20,
         dry_run=False,
     )
+    # No "failed" entry rows — the order ships at the trimmed qty.
+    failed_entries = [
+        o for o in report.submitted_orders
+        if o.status == "failed" and o.role == "entry"
+    ]
+    assert failed_entries == [], (
+        f"expected zero failed entry rows after cap-trim, got: {failed_entries}"
+    )
+    # The entry was submitted at the capped qty.
+    entries = [
+        o for o in report.submitted_orders
+        if o.role == "entry" and o.status == "submitted"
+    ]
+    assert len(entries) == 1
+    # 20% × $100k / $200 = 100 shares.
+    assert entries[0].qty == 100
+
+
+def test_daily_rebalance_refuses_only_when_single_share_exceeds_cap() -> None:
+    """When even ONE share's notional exceeds the cap (e.g., super-high
+    price on a tiny account), we still refuse — there's no trim path."""
+    # $1000 share, $5000 cap → can't even buy 1 share at $1000 ≤ $5000? wait,
+    # $1000 < $5000 so 1 share fits. Build the impossible case explicitly.
+    client = _FakeTradingClient(equity=10_000)
+    exec_ = AlpacaExecutor(trading_client=client)
+    # 20% × $10k = $2k cap. A $3000/share name can't fit even 1 share.
+    report = exec_.submit_daily_rebalance(
+        target_weights={"BRKA": 1.0},
+        signal_prices={"BRKA": 3_000.0},
+        stop_loss_pct=0.05,
+        max_position_weight=0.20,
+        dry_run=False,
+    )
     failed = [o for o in report.submitted_orders if o.status == "failed"]
-    assert len(failed) >= 1
-    assert "max_position_weight" in failed[0].error
+    assert any("single share" in (o.error or "").lower() for o in failed), (
+        f"expected single-share refusal, got: {[o.error for o in failed]}"
+    )
 
 
 def test_daily_rebalance_rejects_negative_target_weight() -> None:
