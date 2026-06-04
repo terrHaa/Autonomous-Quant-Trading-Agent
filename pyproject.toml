@@ -39,6 +39,10 @@ dependencies = [
 
     # --- AI analyst (monthly strategy review + generation) ---
     "anthropic>=0.30",     # Anthropic SDK — Claude API for strategy analysis.
+
+    # --- Universe auto-refresh (quarterly S&P 500 membership fetch from Wikipedia) ---
+    "lxml>=5.0",           # HTML table parser for pandas.read_html(). Without
+                           # it, quant-sp500-refresh can't fetch Wikipedia tables.
 ]
 
 [project.scripts]
@@ -49,6 +53,7 @@ quant-daily-report = "quant.agent.daily_runner:cli_run_report"
 quant-daily-audit = "quant.agent.audit:cli_run"
 quant-weekly-review = "quant.agent.weekly_review:cli_run"
 quant-monthly-review = "quant.agent.monthly_review:cli_run"
+quant-sp500-refresh = "quant.agent.sp500_refresh:cli_run"
 
 [project.optional-dependencies]
 # Optional groups installed via `uv sync --extra <name>`.

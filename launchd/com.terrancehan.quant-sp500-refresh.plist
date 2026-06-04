@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Quarterly S&P 500 membership refresh.
+
+  Fetches Wikipedia's current-constituents + selected-changes tables,
+  builds a new reference/universe/sp500.csv, validates it against
+  safety gates, and emails the operator the diff. The live CSV is
+  ONLY replaced if all safety gates pass (otherwise the existing
+  file stays in place and a FAILED email is sent).
+
+  Schedule: Day 7 of March, June, September, December at 06:00 CST.
+  Day 7 = roughly one week after each quarter-end, so S&P's quarterly
+  rebalance announcements have had time to settle. 06:00 CST is
+  before market open in any timezone — won't fight other launchd
+  jobs for bandwidth.
+
+  The script does NOT auto-commit. The operator reads the email,
+  reviews `git diff reference/universe/sp500.csv`, and commits
+  manually (or rolls back if the data looks wrong).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.terrancehan.quant-sp500-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-sp500-refresh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Month</key><integer>3</integer>
+            <key>Day</key><integer>7</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Month</key><integer>6</integer>
+            <key>Day</key><integer>7</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Month</key><integer>9</integer>
+            <key>Day</key><integer>7</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Month</key><integer>12</integer>
+            <key>Day</key><integer>7</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/terrancehan/Claude trader/quant</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/sp500-refresh.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/terrancehan/Claude trader/quant/data/agent/launchd-logs/sp500-refresh.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

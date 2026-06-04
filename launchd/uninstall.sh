@@ -1,5 +1,5 @@
 #!/bin/bash
-# Unload and remove all five agent launchd jobs.
+# Unload and remove all six agent launchd jobs.
 #
 # Safe to run even if nothing is loaded — launchctl unload is tolerant of
 # missing/unloaded plists when given || true.
@@ -13,6 +13,7 @@ JOBS=(
     "com.terrancehan.quant-daily-audit"
     "com.terrancehan.quant-weekly-review"
     "com.terrancehan.quant-monthly-review"
+    "com.terrancehan.quant-sp500-refresh"
 )
 
 for job in "${JOBS[@]}"; do

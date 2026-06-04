@@ -72,6 +72,26 @@ logger = logging.getLogger(__name__)
 IMPROVER_BACKTEST_YEARS = 2
 
 
+def _pit_universe_is_active() -> bool:
+    """True iff the point-in-time S&P 500 loader has enough names to
+    be the live universe (no fallback to the static top-50 snapshot).
+
+    Computed at monthly-review time so the wiring_status flag in the
+    pipeline snapshot reflects the CURRENT state of the data file.
+    Flips True after the operator runs (or the cron auto-runs)
+    quant-sp500-refresh and the CSV grows past the minimum viability
+    threshold; flips False if someone truncates the file.
+    """
+    from datetime import date as _date
+
+    from quant.data.universe import _MIN_VIABLE_UNIVERSE_SIZE, load_universe
+    try:
+        members = load_universe("sp500").members(_date.today())
+        return len(members) >= _MIN_VIABLE_UNIVERSE_SIZE
+    except Exception:
+        return False
+
+
 def _build_pipeline_snapshot(config: Config) -> dict:
     """Bundle every hardcoded knob + config value the AI analyst should
     cross-check each month.
@@ -144,15 +164,14 @@ def _build_pipeline_snapshot(config: Config) -> dict:
             "trail_high_uses_intraday_high": True,                 # wired in T2.10
             "mean_reversion_vol_normalized": True,                 # wired in T2.11
             "improver_uses_cost_aware_backtest": True,             # verified in T2.12 — was already correct
-            "universe_uses_point_in_time_membership": False,       # PARTIAL: code path is ready via
-                                                                   # load_active_universe(), which falls back to
-                                                                   # the survivorship-biased top-50 snapshot when
-                                                                   # the CSV has < 50 active members. As of this
-                                                                   # commit the shipped CSV is a starter set, so
-                                                                   # the fallback fires every run. To complete:
-                                                                   # operator runs tools/curate_sp500_membership.py
-                                                                   # with Wikipedia data, then this flag flips.
-                                                                   # See reference/README.md for the workflow.
+            "universe_uses_point_in_time_membership": _pit_universe_is_active(),  # Computed
+                                                                   # at snapshot-build time — checks whether
+                                                                   # load_universe('sp500').members(today)
+                                                                   # returns the minimum viable count. Flips
+                                                                   # True automatically after the quarterly
+                                                                   # quant-sp500-refresh cron populates the
+                                                                   # CSV; flips False if someone truncates
+                                                                   # the file.
             "_notes": (
                 "These flags indicate whether 'advertised' risk-management features are "
                 "actually called in the live trading path. A False here is a dead-code or "

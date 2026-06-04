@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the five launchd jobs that drive the autonomous agent.
+# Install the six launchd jobs that drive the autonomous agent.
 #
 # Copies the .plist files to ~/Library/LaunchAgents/ and loads them with
 # launchctl. Idempotent — safe to re-run after editing a plist (it will
@@ -27,6 +27,7 @@ JOBS=(
     "com.terrancehan.quant-daily-audit"
     "com.terrancehan.quant-weekly-review"
     "com.terrancehan.quant-monthly-review"
+    "com.terrancehan.quant-sp500-refresh"
 )
 
 for job in "${JOBS[@]}"; do
@@ -46,7 +47,7 @@ for job in "${JOBS[@]}"; do
 done
 
 echo ""
-echo "All five jobs installed and loaded."
+echo "All six jobs installed and loaded."
 echo ""
 echo "To verify:  launchctl list | grep terrancehan"
 echo "To check a specific job:  launchctl print gui/\$(id -u)/com.terrancehan.quant-daily-trade"

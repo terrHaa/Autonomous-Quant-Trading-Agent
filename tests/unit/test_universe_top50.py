@@ -62,23 +62,24 @@ from datetime import date as _date  # noqa: E402
 from quant.data.universe import load_active_universe  # noqa: E402
 
 
-def test_load_active_universe_falls_back_when_pit_csv_too_small() -> None:
-    """The shipped sp500.csv has < 50 active names (it's a starter set),
-    so today the loader MUST fall back to load_top50_snapshot. This
-    behaviour is the safety hatch that keeps the agent running while
-    you curate the comprehensive CSV.
+def test_load_active_universe_uses_pit_when_csv_is_populated() -> None:
+    """After quant-sp500-refresh runs, the CSV holds ~500 active names
+    and load_active_universe MUST use the point-in-time path (not the
+    survivorship-biased top-50 fallback).
 
-    When you finish curating the CSV (>= 50 active names), this test
-    starts failing — that's the signal that fallback is no longer
-    needed and the agent is on point-in-time membership for real.
+    Regression guard. If this test fails, either:
+      - reference/universe/sp500.csv was truncated (revert it), or
+      - the loader's fallback threshold was raised above ~500
+    Both are bugs.
     """
     syms = load_active_universe(_date.today(), fallback_log=False)
-    # The fallback returns the top-50 snapshot. It should contain
-    # at least 50 names; the starter point-in-time CSV has way fewer.
-    assert len(syms) >= 50, (
-        "Either the fallback is broken (top-50 snapshot returned < 50 names) "
-        "OR the point-in-time CSV is now comprehensive — in which case "
-        "delete this test and add one verifying the PIT path is in use."
+    # PIT returns the full S&P 500 (~500); fallback returns only 50.
+    # > 100 is well above the fallback ceiling — proves we're on PIT.
+    assert len(syms) > 100, (
+        f"Expected ~500 active S&P 500 names from PIT loader; got {len(syms)}. "
+        "Either reference/universe/sp500.csv was truncated, or the loader "
+        "fell back to the survivorship-biased top-50 snapshot. Re-run "
+        "quant-sp500-refresh to repopulate."
     )
 
 

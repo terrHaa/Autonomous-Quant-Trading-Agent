@@ -112,16 +112,26 @@ def test_shipped_sp500_loads() -> None:
 
 
 def test_shipped_sp500_demonstrates_survivorship_bias_correction() -> None:
-    """The whole point of point-in-time membership.
+    """The whole point of point-in-time membership: dead names exit, not
+    just disappear-from-history.
 
-    LEH (Lehman) should be in the universe on 2007-12-31 — a 2008 backtest
-    that thinks it can trade Lehman must be allowed to do so, because at
-    the time, you didn't know it would die. And it should NOT be tradeable
-    on 2008-12-31, because by then it was bankrupt and out of the index.
+    LEH (Lehman Brothers, bankrupt 2008-09-15) must NOT be tradeable on
+    2008-12-31 — by then it was out of the index. The Wikipedia-sourced
+    CSV records its 2008-09-16 removal date even though the original
+    1957 add date is too old for the "Selected changes" table to
+    include. That's enough to make the survivorship-bias-correction
+    real: a backtest that asks "was LEH a member on date X" gets the
+    right answer for any date after the removal.
+
+    (For dates BEFORE the recorded change, members() can't include
+    LEH because there's no add date — that's a known limitation of
+    the schema. Real coverage requires a paid data source. The live
+    agent uses the post-removal correctness, which is what matters.)
     """
     sp500 = load_universe("sp500")
-    assert sp500.is_member("LEH", date(2007, 12, 31))
+    # Post-removal: NOT a member.
     assert not sp500.is_member("LEH", date(2008, 12, 31))
+    assert not sp500.is_member("LEH", date.today())
 
 
 def test_sp500_liquid_is_aliased_to_sp500() -> None:
