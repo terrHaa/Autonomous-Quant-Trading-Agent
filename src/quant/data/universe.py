@@ -182,6 +182,31 @@ def load_top50_snapshot() -> list[str]:
     return list(dict.fromkeys(s.upper().strip() for s in df["symbol"]))
 
 
+def load_sector_map() -> dict[str, str]:
+    """Return ``{symbol: sector}`` for every name in the top-50 snapshot.
+
+    Reads the ``sector`` column from ``reference/universe/sp500_top50.csv``.
+    Used by the daily-trade routine to enforce the per-sector concentration
+    cap (no more than N% of the book in any single GICS sector).
+
+    Names not in the snapshot don't appear in the returned dict — the
+    cap logic treats them as "unknown sector" and leaves their weight
+    alone. Add new tickers + their sectors to the CSV when you expand
+    the universe.
+    """
+    csv_path = _REFERENCE_DIR / "sp500_top50.csv"
+    if not csv_path.exists():
+        return {}
+    df = pd.read_csv(csv_path, comment="#")
+    if "symbol" not in df.columns or "sector" not in df.columns:
+        return {}
+    return {
+        s.upper().strip(): sec
+        for s, sec in zip(df["symbol"], df["sector"], strict=False)
+        if isinstance(s, str) and isinstance(sec, str)
+    }
+
+
 def _validate_membership_table(df: pd.DataFrame, csv_path: Path) -> None:
     """Fail loudly if the membership CSV is structurally wrong."""
     required = {"symbol", "added", "removed"}

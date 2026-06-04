@@ -289,6 +289,62 @@ def test_vol_target_returns_original_when_bars_unavailable() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_sector_cap_trims_overweight_sector() -> None:
+    """If a sector totals > MAX_SECTOR_WEIGHT, names in it are
+    proportionally trimmed; the freed weight goes to cash (not
+    redistributed to other sectors — preserves the ensemble signal)."""
+    # 4 banks at 12% each = 48% Financials. With max=30%, scale = 30/48
+    # = 0.625, so each bank → 7.5%.
+    weights = {
+        "JPM": 0.12, "BAC": 0.12, "GS": 0.12, "MS": 0.12,
+        "AAPL": 0.05, "MSFT": 0.05,    # Tech, under cap
+    }
+    sectors = {
+        "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
+        "MS": "Financials",
+        "AAPL": "Information Technology", "MSFT": "Information Technology",
+    }
+    out = daily_runner._apply_sector_cap(weights, sectors, max_sector_weight=0.30)
+
+    # Bank weights trimmed proportionally.
+    assert sum(out[s] for s in ["JPM", "BAC", "GS", "MS"]) == pytest.approx(0.30)
+    for s in ["JPM", "BAC", "GS", "MS"]:
+        assert out[s] == pytest.approx(0.075)
+    # Tech weights unchanged (under cap).
+    assert out["AAPL"] == 0.05
+    assert out["MSFT"] == 0.05
+    # Freed weight is dropped (not added to tech) — total sum < original.
+    assert sum(out.values()) < sum(weights.values())
+
+
+def test_sector_cap_passes_through_when_under_cap() -> None:
+    """No sector exceeds the cap → weights pass through unchanged."""
+    weights = {"JPM": 0.10, "AAPL": 0.10, "XOM": 0.10}
+    sectors = {"JPM": "Financials", "AAPL": "Information Technology", "XOM": "Energy"}
+    out = daily_runner._apply_sector_cap(weights, sectors, max_sector_weight=0.30)
+    assert out == weights
+
+
+def test_sector_cap_handles_unmapped_symbols() -> None:
+    """Names not in the sector map pass through unchanged (we can't
+    enforce a cap if we don't know the sector)."""
+    weights = {"AAPL": 0.05, "WEIRDCO": 0.10}
+    sectors = {"AAPL": "Information Technology"}   # WEIRDCO unmapped
+    out = daily_runner._apply_sector_cap(weights, sectors, max_sector_weight=0.30)
+    assert out["WEIRDCO"] == 0.10   # passed through
+
+
+def test_sector_cap_loads_real_map_from_csv() -> None:
+    """End-to-end: load_sector_map reads the production CSV correctly."""
+    from quant.data.universe import load_sector_map
+    sector_map = load_sector_map()
+    # Spot-check a couple known names.
+    assert sector_map.get("AAPL") == "Information Technology"
+    assert sector_map.get("JPM") == "Financials"
+    # Map should cover the full top-50 universe.
+    assert len(sector_map) >= 50
+
+
 def test_kill_switch_tripped_when_drawdown_exceeds_threshold(tmp_path: Path) -> None:
     """If equity is more than threshold% below peak (computed from run JSONs),
     the kill switch trips. Reads peak across the persisted run history."""

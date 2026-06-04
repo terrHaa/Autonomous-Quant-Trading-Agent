@@ -139,9 +139,18 @@ def _build_pipeline_snapshot(config: Config) -> dict:
             "vol_targeting_active_in_daily_trade": True,           # wired in T1.3
             "atr_normalized_stops_active": True,                   # wired in T1.5
             "fill_anchored_stops_active": True,                    # wired in T1.4 (post-fill repair)
-            "sector_concentration_cap_active": False,              # NOT wired (TIER 2)
-            "universe_uses_point_in_time_membership": False,       # uses load_top50_snapshot — survivorship-biased (TIER 2)
-            "conviction_weighted_strategy_outputs": False,         # all 3 strategies equal-weight their picks (TIER 2)
+            "sector_concentration_cap_active": True,               # wired in T2.9
+            "conviction_weighted_strategy_outputs": True,          # wired in T2.8 (all 3 strategies)
+            "trail_high_uses_intraday_high": True,                 # wired in T2.10
+            "mean_reversion_vol_normalized": True,                 # wired in T2.11
+            "improver_uses_cost_aware_backtest": True,             # verified in T2.12 — was already correct
+            "universe_uses_point_in_time_membership": False,       # STILL OPEN: requires comprehensive historical
+                                                                   # S&P 500 membership data we don't own. The CSV
+                                                                   # at reference/universe/sp500.csv is a
+                                                                   # "STARTER set, not comprehensive". Real fix
+                                                                   # requires a data infrastructure investment
+                                                                   # (CRSP, S&P, Norgate, etc.). Documenting
+                                                                   # here so the analyst keeps flagging it.
             "_notes": (
                 "These flags indicate whether 'advertised' risk-management features are "
                 "actually called in the live trading path. A False here is a dead-code or "

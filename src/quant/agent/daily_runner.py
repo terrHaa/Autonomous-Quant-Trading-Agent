@@ -52,7 +52,7 @@ from quant.backtest.types import Snapshot
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_top50_snapshot
+from quant.data.universe import load_sector_map, load_top50_snapshot
 from quant.execution.alpaca_executor import AlpacaExecutor
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,17 @@ STOP_REPAIR_DRIFT_THRESHOLD = 0.01    # 1%
 # Live: ~30s is enough for market-on-open + 5-min OTO submissions to
 # fill. Tests set this to 0.
 STOP_REPAIR_WAIT_SECONDS = 30.0
+
+# Sector concentration cap (operator hard rule). No single GICS sector
+# may exceed this fraction of equity. 0.30 = 30% per sector — looser
+# than the 20-25% institutional norm because the operator's already
+# accepted concentrated single-name risk via MAX_POSITION_WEIGHT=0.20,
+# so the sector cap mostly guards against IMPLICIT correlation (e.g.,
+# 4 banks at 7% each = 28% bank exposure with hidden correlation).
+# When exceeded, names within the offending sector are proportionally
+# trimmed; the freed weight goes to cash (no rebalancing into other
+# sectors — keeping the original ensemble signal intact).
+MAX_SECTOR_WEIGHT = 0.30
 
 # Tunable parameters live in StrategyParams (persisted to
 # data/agent/strategy_params.json); the auto-improver may swap them
@@ -257,6 +268,59 @@ def _kill_switch_tripped(
         return False, peak, 0.0
     drawdown = (current_equity - peak) / peak
     return drawdown < -threshold, peak, drawdown
+
+
+def _apply_sector_cap(
+    target_weights: dict[str, float],
+    sector_map: dict[str, str],
+    *,
+    max_sector_weight: float = MAX_SECTOR_WEIGHT,
+) -> dict[str, float]:
+    """Cap per-sector exposure by proportionally trimming names within
+    any sector that exceeds the cap.
+
+    Names not in ``sector_map`` are passed through unchanged (we don't
+    know what sector they're in, so we can't enforce the cap on them).
+    The freed weight from trimming a sector goes to CASH — we don't
+    rebalance it into other sectors because that would distort the
+    ensemble's original signal mix. The operator's per-name and
+    portfolio-level vol-target caps are independent.
+
+    Example: ensemble outputs 6 banks at 7% each = 42% Financials.
+    With max_sector_weight=0.30, each is trimmed by 30/42 ≈ 71% →
+    each bank ends up at 5%. Total bank exposure = 30%. The remaining
+    12% becomes cash.
+    """
+    if not target_weights or not sector_map:
+        return dict(target_weights)
+
+    # Group weights by sector.
+    by_sector: dict[str, dict[str, float]] = {}
+    untagged: dict[str, float] = {}
+    for sym, w in target_weights.items():
+        if sym in sector_map:
+            by_sector.setdefault(sector_map[sym], {})[sym] = w
+        else:
+            untagged[sym] = w
+
+    out: dict[str, float] = dict(untagged)
+    for sector, names in by_sector.items():
+        sector_total = sum(names.values())
+        if sector_total <= max_sector_weight:
+            # Under the cap — pass through unchanged.
+            out.update(names)
+        else:
+            # Over the cap — proportionally trim each name in this sector.
+            scale = max_sector_weight / sector_total
+            for sym, w in names.items():
+                out[sym] = w * scale
+            logger.info(
+                "sector cap: %s was %.1f%%, trimmed to %.1f%% (%d names "
+                "each scaled by %.3f)",
+                sector, sector_total * 100, max_sector_weight * 100,
+                len(names), scale,
+            )
+    return out
 
 
 def _build_trail_anchors(
@@ -581,6 +645,16 @@ def run_daily_trade(
         "ensemble emitted %d target positions (as_of=%s); %d strategies in shadow",
         len(target_weights), as_of, len(shadow_today),
     )
+
+    # --- 2c. Sector concentration cap (operator hard rule) ---
+    # Trim any GICS sector exceeding MAX_SECTOR_WEIGHT (30%). Defends
+    # against the hidden-correlation case: 6 banks at 7% each = 42%
+    # Financials with one underlying risk factor. Trim is proportional
+    # within the offending sector; freed weight goes to cash (we don't
+    # rebalance into other sectors — preserves the original ensemble
+    # signal mix). Names not in the sector map pass through unchanged.
+    sector_map = load_sector_map()
+    target_weights = _apply_sector_cap(target_weights, sector_map)
 
     # --- 3. Signal prices = the last available close per target name. ---
     signal_prices: dict[str, float] = {}
