@@ -60,7 +60,7 @@ from quant.agent.strategy_sandbox import (
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_top50_snapshot
+from quant.data.universe import load_active_universe
 from quant.util.equity_stats import daily_returns, equity_series_stats, top_movers
 
 logger = logging.getLogger(__name__)
@@ -144,13 +144,15 @@ def _build_pipeline_snapshot(config: Config) -> dict:
             "trail_high_uses_intraday_high": True,                 # wired in T2.10
             "mean_reversion_vol_normalized": True,                 # wired in T2.11
             "improver_uses_cost_aware_backtest": True,             # verified in T2.12 — was already correct
-            "universe_uses_point_in_time_membership": False,       # STILL OPEN: requires comprehensive historical
-                                                                   # S&P 500 membership data we don't own. The CSV
-                                                                   # at reference/universe/sp500.csv is a
-                                                                   # "STARTER set, not comprehensive". Real fix
-                                                                   # requires a data infrastructure investment
-                                                                   # (CRSP, S&P, Norgate, etc.). Documenting
-                                                                   # here so the analyst keeps flagging it.
+            "universe_uses_point_in_time_membership": False,       # PARTIAL: code path is ready via
+                                                                   # load_active_universe(), which falls back to
+                                                                   # the survivorship-biased top-50 snapshot when
+                                                                   # the CSV has < 50 active members. As of this
+                                                                   # commit the shipped CSV is a starter set, so
+                                                                   # the fallback fires every run. To complete:
+                                                                   # operator runs tools/curate_sp500_membership.py
+                                                                   # with Wikipedia data, then this flag flips.
+                                                                   # See reference/README.md for the workflow.
             "_notes": (
                 "These flags indicate whether 'advertised' risk-management features are "
                 "actually called in the live trading path. A False here is a dead-code or "
@@ -348,7 +350,7 @@ def run_monthly_review(
         lookback=current_state.xsec_lookback,
         skip=current_state.xsec_skip,
     )
-    universe = universe or load_top50_snapshot()
+    universe = universe or load_active_universe(for_date)
     improvement_result: ImprovementResult | None = None
     recommendations: list[str] = []
     grid_search_summary = "Grid search was not run this month."

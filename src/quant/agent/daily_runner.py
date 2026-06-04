@@ -52,7 +52,7 @@ from quant.backtest.types import Snapshot
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_sector_map, load_top50_snapshot
+from quant.data.universe import load_active_universe, load_sector_map
 from quant.execution.alpaca_executor import AlpacaExecutor
 
 logger = logging.getLogger(__name__)
@@ -533,7 +533,10 @@ def run_daily_trade(
         )
         return None
 
-    universe = universe or load_top50_snapshot()
+    # Point-in-time universe (falls back to top-50 snapshot if the
+    # comprehensive membership CSV isn't curated yet — see
+    # reference/universe/sp500.csv and tools/curate_sp500_membership.py).
+    universe = universe or load_active_universe(today)
     cache = cache or BarsCache(client=AlpacaDataClient(), root=Path("data/bars/daily"))
     executor = executor or AlpacaExecutor()
     state = ensemble_state or load_ensemble_state()

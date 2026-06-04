@@ -51,3 +51,55 @@ def test_no_foreign_listings() -> None:
         assert foreign not in symbols, (
             f"{foreign} listed in foreign exchange — not S&P 500"
         )
+
+
+# ---------------------------------------------------------------------------
+# load_active_universe — point-in-time loader with fallback
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date  # noqa: E402
+
+from quant.data.universe import load_active_universe  # noqa: E402
+
+
+def test_load_active_universe_falls_back_when_pit_csv_too_small() -> None:
+    """The shipped sp500.csv has < 50 active names (it's a starter set),
+    so today the loader MUST fall back to load_top50_snapshot. This
+    behaviour is the safety hatch that keeps the agent running while
+    you curate the comprehensive CSV.
+
+    When you finish curating the CSV (>= 50 active names), this test
+    starts failing — that's the signal that fallback is no longer
+    needed and the agent is on point-in-time membership for real.
+    """
+    syms = load_active_universe(_date.today(), fallback_log=False)
+    # The fallback returns the top-50 snapshot. It should contain
+    # at least 50 names; the starter point-in-time CSV has way fewer.
+    assert len(syms) >= 50, (
+        "Either the fallback is broken (top-50 snapshot returned < 50 names) "
+        "OR the point-in-time CSV is now comprehensive — in which case "
+        "delete this test and add one verifying the PIT path is in use."
+    )
+
+
+def test_load_active_universe_uses_pit_when_csv_has_enough_names(
+    monkeypatch, tmp_path,
+) -> None:
+    """When the point-in-time CSV has enough active names, the loader
+    USES it (no fallback). Regression guard for the day the user
+    finishes the curation work."""
+    # Build a fake Universe with 60 active members.
+    from types import SimpleNamespace
+
+    fake_members = [f"SYM{i}" for i in range(60)]
+
+    def fake_load_universe(name):
+        return SimpleNamespace(members=lambda as_of: fake_members)
+
+    monkeypatch.setattr(
+        "quant.data.universe.load_universe", fake_load_universe,
+    )
+    syms = load_active_universe(_date.today(), fallback_log=False)
+    # PIT path took over — exact membership returned.
+    assert syms == fake_members
+    assert len(syms) == 60

@@ -43,7 +43,7 @@ from quant.agent.reports import render_weekly_report
 from quant.config import Config, load_config
 from quant.data.alpaca_client import AlpacaDataClient
 from quant.data.cache import BarsCache
-from quant.data.universe import load_top50_snapshot
+from quant.data.universe import load_active_universe
 from quant.util.equity_stats import equity_series_stats, top_movers
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def run_weekly_review(
     if refit_hrp:
         try:
             state = load_ensemble_state(path=state_path)
-            universe = universe or load_top50_snapshot()
+            universe = universe or load_active_universe(for_date)
             cache = cache or BarsCache(
                 client=AlpacaDataClient(), root=Path("data/bars/daily"),
             )

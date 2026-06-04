@@ -182,6 +182,55 @@ def load_top50_snapshot() -> list[str]:
     return list(dict.fromkeys(s.upper().strip() for s in df["symbol"]))
 
 
+# Below this size, point-in-time membership lookup is treated as
+# "data not ready yet" and the loader falls back to the static top-50
+# snapshot. Tuned generously: ~50 current names is the minimum for the
+# ensemble to have enough cross-sectional dispersion to work.
+_MIN_VIABLE_UNIVERSE_SIZE = 50
+
+
+def load_active_universe(as_of: date, *, fallback_log: bool = True) -> list[str]:
+    """Universe of names the agent is allowed to trade on ``as_of``.
+
+    Tries the point-in-time membership table at
+    ``reference/universe/sp500.csv`` first (returns names that were in
+    the S&P 500 on ``as_of`` — no survivorship bias). If that CSV is
+    too sparse to support live trading (< ``_MIN_VIABLE_UNIVERSE_SIZE``
+    names), falls back to the static ``load_top50_snapshot()``.
+
+    The fallback exists so the agent keeps running while you curate
+    the comprehensive history CSV. Each fallback logs a warning so
+    the operator (and the analyst's monthly self-audit) sees that
+    survivorship bias is still in play.
+
+    Why this function: it's the single point where survivorship-bias
+    avoidance lives. Once the CSV is complete the fallback never
+    fires and the bias is eliminated; until then we know exactly
+    where the gap is.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    try:
+        u = load_universe("sp500")
+        pit_members = u.members(as_of)
+    except (FileNotFoundError, ValueError, OSError):
+        pit_members = []
+
+    if len(pit_members) >= _MIN_VIABLE_UNIVERSE_SIZE:
+        return pit_members
+
+    fallback = load_top50_snapshot()
+    if fallback_log:
+        _logger.warning(
+            "load_active_universe: point-in-time membership for %s "
+            "returned only %d names (< %d minimum); falling back to "
+            "load_top50_snapshot() — survivorship bias still in play. "
+            "Extend reference/universe/sp500.csv to remove this warning.",
+            as_of, len(pit_members), _MIN_VIABLE_UNIVERSE_SIZE,
+        )
+    return fallback
+
+
 def load_sector_map() -> dict[str, str]:
     """Return ``{symbol: sector}`` for every name in the top-50 snapshot.
 

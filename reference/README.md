@@ -19,8 +19,36 @@ the survivorship-bias correction, but not exhaustive. Two paths to grow it:
 1. **Manual:** look up additions and removals on Wikipedia ("List of S&P 500
    companies" → the "Selected changes" table), add rows to the CSV, keep the
    header columns the same.
-2. **Scripted (TODO):** write `scripts/scrape_sp500.py` that parses the
-   Wikipedia table. Coverage is good post-1976; pre-1976 the data thins out.
+2. **Scripted:** `tools/curate_sp500_membership.py` builds this CSV from two
+   Wikipedia-format inputs. See the script's docstring for the full workflow.
+   Quick start:
+
+       # 1. Paste Wikipedia tables into spreadsheets, save as CSV.
+       #    https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
+       # 2. Run the curator:
+       uv run python tools/curate_sp500_membership.py \
+           --current wikipedia_current.csv \
+           --changes wikipedia_changes.csv \
+           --out reference/universe/sp500.csv
+       # 3. Diff, sanity-check, commit.
+
+   Coverage: Wikipedia's "Selected changes" table is reliable back to ~2000.
+   That's enough history for any realistic backtest window.
+
+   **Quarterly refresh:** S&P announces index changes ~10-20x per year.
+   After each batch, update `wikipedia_changes.csv`, re-run, diff, commit.
+
+### How the agent uses this CSV
+
+`quant.data.universe.load_active_universe(as_of)` returns the point-in-time
+S&P 500 membership for any date. The live agent calls it daily; the weekly
+HRP refit + monthly grid search use it for their backtest windows.
+
+**Fallback behavior:** if the CSV has < 50 active members on `as_of`, the
+loader falls back to `load_top50_snapshot()` (the static, survivorship-biased
+list) and logs a warning. The monthly AI analyst's pipeline self-audit
+also flags the fallback, so you'll see it in the email until the CSV is
+comprehensive enough to support the live universe.
 
 ### Schema
 

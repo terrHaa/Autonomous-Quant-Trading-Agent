@@ -51,7 +51,7 @@ from quant.agent.daily_runner import _email_failure, _markdown_to_html
 from quant.agent.email_sender import EmailSender
 from quant.agent.ensemble import build_strategies, load_ensemble_state
 from quant.agent.log import _atomic_write_text, load_daily_run
-from quant.data.universe import load_top50_snapshot
+from quant.data.universe import load_active_universe
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +259,7 @@ def _check_ensemble_state() -> AuditCheck:
 
     # Each strategy in the ensemble must build cleanly.
     try:
-        universe = load_top50_snapshot()
+        universe = load_active_universe(date.today(), fallback_log=False)
         strats = build_strategies(state, universe)
         built_names = {s.name for s in strats}
     except Exception as e:
