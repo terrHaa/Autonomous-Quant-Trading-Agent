@@ -819,6 +819,106 @@ def append_accepted_strategy_to_library(
 # ---------------------------------------------------------------------------
 
 
+def format_ai_error(exc: Exception) -> str:
+    """Operator-friendly multi-line message for a failed analyst call.
+
+    Why this exists: when the analyst dies, the review's email body used
+    to be the raw ``f"{type(e).__name__}: {e}"``, e.g.
+    ``PermissionDeniedError: Error code: 403 - {'error': {'type': 'forbidden',
+    'message': 'Request not allowed'}}``. That tells the operator nothing
+    about what to DO. This helper classifies the failure into one of three
+    recoverable patterns and emits a recipe — including the exact CLI
+    command to re-run the analyst (alone, no HRP refit) once the operator
+    fixes the underlying issue.
+
+    Patterns recognised:
+      • HTTP 403 from Anthropic → almost always the VPN exit IP landed on
+        Anthropic's edge deny-list. Recipe: switch VPN region and re-run
+        with ``--ai-only``.
+      • APIConnectionError / TLS reset / connection-pool error → upstream
+        connection died mid-handshake. Almost always a network blip
+        (VPN tunnel re-establishing, GFW interference). Recipe: re-run
+        in a few minutes with ``--ai-only``.
+      • Anything else → unclassified; show the raw exception but still
+        include the ``--ai-only`` recipe so the operator has a recovery
+        path.
+
+    Returns a markdown-ready string suitable for dropping into the email.
+    """
+    exc_name = type(exc).__name__
+    raw_msg = str(exc)
+
+    # Anthropic returns a PermissionDeniedError on 403. We avoid importing
+    # the anthropic module here (keeps this function callable from contexts
+    # where anthropic isn't installed) and instead match by name + content.
+    is_403 = (
+        exc_name == "PermissionDeniedError"
+        or "403" in raw_msg
+        or "forbidden" in raw_msg.lower()
+        or "request not allowed" in raw_msg.lower()
+    )
+    is_connection = (
+        exc_name in {"APIConnectionError", "APITimeoutError", "ConnectionError"}
+        or "connection" in raw_msg.lower() and "reset" in raw_msg.lower()
+        or "connection error" in raw_msg.lower()
+    )
+
+    rerun_recipe = (
+        "Once fixed, recover with:\n"
+        "    uv run quant-weekly-review --for-date=YYYY-MM-DD --ai-only\n"
+        "(or `quant-monthly-review --ai-only` for the monthly pipeline). "
+        "The `--ai-only` flag skips the HRP refit / grid search and only "
+        "re-fires the analyst, so the rest of the pipeline state stays "
+        "untouched."
+    )
+
+    if is_403:
+        return (
+            f"_AI deep-dive failed: **Anthropic returned HTTP 403 "
+            f"(`{exc_name}: {raw_msg[:200]}`)**._\n\n"
+            "This is almost always Anthropic's CDN flagging the current "
+            "VPN exit IP as a known proxy/datacenter address — NOT a code "
+            "bug, NOT the API key. Most VPN providers rotate exit IPs "
+            "continuously; one of today's IPs is on Anthropic's list.\n\n"
+            "**Recipe**: switch VPN region (or restart the tunnel to "
+            "pick a fresh IP), confirm with\n\n"
+            "    curl -sS -o /dev/null -w '%{http_code}\\n' "
+            "https://api.anthropic.com/v1/messages \\\n"
+            "      -H \"x-api-key: $ANTHROPIC_API_KEY\" "
+            "-H \"anthropic-version: 2023-06-01\" \\\n"
+            "      -H \"content-type: application/json\" \\\n"
+            "      -d '{\"model\":\"claude-opus-4-5\",\"max_tokens\":5,"
+            "\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}'\n\n"
+            "(expect `200`). Then:\n\n"
+            + rerun_recipe + "\n\n"
+            "_The numeric summary and HRP refit below are still valid._"
+        )
+    if is_connection:
+        return (
+            f"_AI deep-dive failed: **upstream connection error "
+            f"(`{exc_name}: {raw_msg[:200]}`)**._\n\n"
+            "The TCP/TLS handshake to api.anthropic.com died mid-flight — "
+            "typically the VPN tunnel re-establishing or transient GFW "
+            "interference. Not a code bug.\n\n"
+            "**Recipe**: wait a minute, confirm the tunnel is healthy "
+            "(`curl -sS https://api.anthropic.com/v1/messages -o /dev/null -w "
+            "'%{http_code}\\n' -H \"x-api-key: $ANTHROPIC_API_KEY\" "
+            "-H \"anthropic-version: 2023-06-01\" -H \"content-type: "
+            "application/json\" -d '{\"model\":\"claude-opus-4-5\","
+            "\"max_tokens\":5,\"messages\":[{\"role\":\"user\","
+            "\"content\":\"ping\"}]}'`), then:\n\n"
+            + rerun_recipe + "\n\n"
+            "_The numeric summary and HRP refit below are still valid._"
+        )
+    return (
+        f"_AI deep-dive failed: `{exc_name}: {raw_msg[:300]}`._\n\n"
+        "Unrecognised failure — check the launchd .out log for the full "
+        "traceback. Once you understand the root cause:\n\n"
+        + rerun_recipe + "\n\n"
+        "_The numeric summary and HRP refit below are still valid._"
+    )
+
+
 def _parse_json_response(raw: str) -> dict[str, Any]:
     """Parse Claude's response as JSON.
 

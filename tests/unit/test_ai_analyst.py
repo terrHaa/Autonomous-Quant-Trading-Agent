@@ -630,3 +630,57 @@ def test_summarise_runs_includes_daily_delta_column() -> None:
     assert "Daily Δ%" in table
     # +1% should appear in row 2 (formatted)
     assert "+1.00%" in table
+
+
+# ---------------------------------------------------------------------------
+# format_ai_error — the actionable failure-message helper (T-fix A)
+# ---------------------------------------------------------------------------
+
+
+class _Fake403(Exception):
+    """Mimics anthropic.PermissionDeniedError just by class name."""
+    pass
+
+
+def test_format_ai_error_detects_403_by_class_name() -> None:
+    from quant.agent.ai_analyst import format_ai_error
+    # The real Anthropic class is named PermissionDeniedError; we match by
+    # exception class name so we don't have to import anthropic here.
+    exc = type("PermissionDeniedError", (Exception,), {})(
+        "Error code: 403 - {'error': {'type': 'forbidden', "
+        "'message': 'Request not allowed'}}"
+    )
+    msg = format_ai_error(exc)
+    assert "403" in msg
+    assert "VPN" in msg  # actionable hint
+    assert "--ai-only" in msg  # recovery recipe
+    assert "quant-weekly-review" in msg or "quant-monthly-review" in msg
+
+
+def test_format_ai_error_detects_403_by_message_body() -> None:
+    """Even an unrelated exception class lands on the 403 branch if the
+    message contains 'forbidden' or '403' — defends against the SDK
+    renaming the class in a future release."""
+    from quant.agent.ai_analyst import format_ai_error
+    exc = RuntimeError("API returned forbidden: Request not allowed")
+    msg = format_ai_error(exc)
+    assert "403" in msg or "VPN" in msg
+
+
+def test_format_ai_error_detects_connection_error() -> None:
+    from quant.agent.ai_analyst import format_ai_error
+    exc = type("APIConnectionError", (Exception,), {})("Connection error.")
+    msg = format_ai_error(exc)
+    assert "connection" in msg.lower()
+    assert "--ai-only" in msg
+    # Should NOT mention "VPN exit IP flagged" (that's the 403 branch).
+    assert "exit IP" not in msg
+
+
+def test_format_ai_error_unknown_exception_still_includes_recovery_recipe() -> None:
+    """Even an unclassified exception should hand the operator the
+    --ai-only command — partial failure is better than no guidance."""
+    from quant.agent.ai_analyst import format_ai_error
+    msg = format_ai_error(RuntimeError("some weird bug"))
+    assert "--ai-only" in msg
+    assert "some weird bug" in msg

@@ -228,11 +228,12 @@ def run_weekly_review(
             logger.info("weekly_review: saved deep-dive to %s", saved_path)
         except Exception as e:
             # AI failure must NOT prevent the rest of the report from sending.
-            # Surface it inline so the operator notices.
-            deep_dive_md = (
-                f"_AI deep-dive failed: {type(e).__name__}: {e}. "
-                "The numeric summary and HRP refit below are still valid._"
-            )
+            # format_ai_error classifies the failure (403 / connection /
+            # other) and emits an operator-friendly recovery recipe
+            # including the exact --ai-only re-run command. See ai_analyst
+            # for the rationale + tests.
+            from quant.agent.ai_analyst import format_ai_error
+            deep_dive_md = format_ai_error(e)
             logger.exception("weekly AI analyst call failed")
 
     # -------- 4. Render + email --------
@@ -277,10 +278,25 @@ def cli_run() -> None:
     )
     parser = argparse.ArgumentParser(description="Send the agent's weekly review.")
     parser.add_argument("--for-date", default=None, help="ISO date; defaults to today")
+    parser.add_argument(
+        "--ai-only", action="store_true",
+        help=(
+            "Skip the HRP refit and only re-fire the AI deep-dive. "
+            "Use this to recover from a transient Anthropic failure "
+            "(e.g., HTTP 403 because the VPN exit IP was flagged): "
+            "switch VPN region, then "
+            "`quant-weekly-review --for-date=YYYY-MM-DD --ai-only`. "
+            "Pipeline state (HRP weights, trail_high, etc.) is left "
+            "untouched."
+        ),
+    )
     args = parser.parse_args()
     for_date = date.fromisoformat(args.for_date) if args.for_date else None
     try:
-        subject = run_weekly_review(for_date=for_date)
+        subject = run_weekly_review(
+            for_date=for_date,
+            refit_hrp=not args.ai_only,
+        )
         print(f"[agent] weekly review sent: {subject}")
     except Exception as e:
         _email_failure("weekly review", e)

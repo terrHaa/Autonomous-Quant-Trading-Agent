@@ -326,6 +326,7 @@ def run_monthly_review(
     config: Config | None = None,
     auto_apply: bool = True,
     params_path: Path | None = None,
+    ai_only: bool = False,
     # Test-injection points:
     cache: BarsCache | None = None,
     universe: list[str] | None = None,
@@ -344,7 +345,22 @@ def run_monthly_review(
 
     ``improvement_result`` is None when the improver step was skipped
     (e.g., test mode where no cache is configured).
+
+    Parameters
+    ----------
+    ai_only
+        Recovery path after a transient AI failure (HTTP 403, connection
+        reset, etc.). When True, ALL state mutations are gated:
+          • xsec auto-apply is forced off (regardless of ``auto_apply``)
+          • Accepted AI strategies are NOT persisted to disk / state
+          • MEMORY.md and STRATEGY_LIBRARY.md are NOT appended
+        Effect: re-running with ``--ai-only`` re-renders the analyst's
+        narrative for the operator's inbox without polluting state with
+        duplicate entries. Used by ``quant-monthly-review --ai-only``.
     """
+    # T-fix B: --ai-only forces no-mutation mode.
+    if ai_only:
+        auto_apply = False
     for_date = for_date or date.today()
     runs_dir = runs_dir or DEFAULT_RUNS_DIR
     config = config or load_config()
@@ -640,61 +656,77 @@ def run_monthly_review(
                 )
 
                 if sandbox.passed_gates:
-                    # Save code to disk and update EnsembleState.
-                    save_generated_strategy(
-                        name=proposal.name,
-                        class_name=proposal.class_name,
-                        code=proposal.code,
-                    )
-                    # Accept into ensemble in SHADOW MODE:
-                    # - Added to ai_strategy_names (so build_strategies loads it)
-                    # - HRP weight stays at 0 during shadow (no real allocation)
-                    # - ai_strategy_shadow_until[name] = today + 10 business days
-                    # The daily runner graduates it at that date by removing
-                    # the entry and giving it an equal-split initial weight.
-                    import pandas as _pd  # noqa: PLC0415
-                    shadow_end = (
-                        _pd.Timestamp(for_date) + _pd.tseries.offsets.BDay(10)
-                    ).date()
+                    if ai_only:
+                        # T-fix B: re-run mode. Show what WOULD have been
+                        # accepted but mutate nothing on disk — the
+                        # original run already handled persistence.
+                        recommendations.append(
+                            f"✅ **AI strategy would have been accepted** "
+                            f"(`{proposal.name}`) but `--ai-only` re-run "
+                            f"skips state mutation. Sharpe {sandbox.sharpe:.2f}, "
+                            f"max DD {sandbox.max_drawdown:.1%}, "
+                            f"DSR {sandbox.dsr:.3f}.\n\n"
+                            "If this is a duplicate, the original monthly "
+                            "run already persisted it; check "
+                            "`data/agent/ensemble_state.json` and "
+                            "`src/quant/strategies/generated/`."
+                        )
+                    else:
+                        # Save code to disk and update EnsembleState.
+                        save_generated_strategy(
+                            name=proposal.name,
+                            class_name=proposal.class_name,
+                            code=proposal.code,
+                        )
+                        # Accept into ensemble in SHADOW MODE:
+                        # - Added to ai_strategy_names (so build_strategies loads it)
+                        # - HRP weight stays at 0 during shadow (no real allocation)
+                        # - ai_strategy_shadow_until[name] = today + 10 business days
+                        # The daily runner graduates it at that date by removing
+                        # the entry and giving it an equal-split initial weight.
+                        import pandas as _pd  # noqa: PLC0415
+                        shadow_end = (
+                            _pd.Timestamp(for_date) + _pd.tseries.offsets.BDay(10)
+                        ).date()
 
-                    new_ai_names = list(current_state.ai_strategy_names) + [proposal.name]
-                    new_shadow_map = dict(current_state.ai_strategy_shadow_until)
-                    new_shadow_map[proposal.name] = shadow_end.isoformat()
+                        new_ai_names = list(current_state.ai_strategy_names) + [proposal.name]
+                        new_shadow_map = dict(current_state.ai_strategy_shadow_until)
+                        new_shadow_map[proposal.name] = shadow_end.isoformat()
 
-                    # hrp_weights unchanged — no allocation until graduation.
-                    final_state = replace(
-                        current_state,
-                        ai_strategy_names=new_ai_names,
-                        ai_strategy_shadow_until=new_shadow_map,
-                    )
-                    save_ensemble_state(final_state, path=params_path)
-                    recommendations.append(
-                        f"✅ **AI STRATEGY ACCEPTED — ENTERING 10-DAY SHADOW**: `{proposal.name}`\n\n"
-                        f"- Sharpe: {sandbox.sharpe:.2f}\n"
-                        f"- Max drawdown: {sandbox.max_drawdown:.1%}\n"
-                        f"- DSR: {sandbox.dsr:.3f}\n\n"
-                        f"Shadow period ends: **{shadow_end.isoformat()}** "
-                        f"(10 business days from today).\n\n"
-                        f"During shadow the strategy will be called every day and its "
-                        f"targets logged for analysis, but allocation remains zero. "
-                        f"On {shadow_end.isoformat()} the daily runner graduates it to "
-                        f"equal-split HRP weight; the weekly refit takes over from there.\n\n"
-                        f"```python\n{proposal.code}\n```"
-                    )
-                    logger.info(
-                        "monthly review: AI strategy '%s' applied. "
-                        "Sharpe=%.2f DSR=%.3f",
-                        proposal.name, sandbox.sharpe, sandbox.dsr,
-                    )
-                    # Persist to STRATEGY_LIBRARY.md so next month's analyst
-                    # sees this strategy in its canonical catalog.
-                    append_accepted_strategy_to_library(
-                        review_date=for_date,
-                        proposal=proposal,
-                        sharpe=sandbox.sharpe,
-                        max_drawdown=sandbox.max_drawdown,
-                        dsr=sandbox.dsr,
-                    )
+                        # hrp_weights unchanged — no allocation until graduation.
+                        final_state = replace(
+                            current_state,
+                            ai_strategy_names=new_ai_names,
+                            ai_strategy_shadow_until=new_shadow_map,
+                        )
+                        save_ensemble_state(final_state, path=params_path)
+                        recommendations.append(
+                            f"✅ **AI STRATEGY ACCEPTED — ENTERING 10-DAY SHADOW**: `{proposal.name}`\n\n"
+                            f"- Sharpe: {sandbox.sharpe:.2f}\n"
+                            f"- Max drawdown: {sandbox.max_drawdown:.1%}\n"
+                            f"- DSR: {sandbox.dsr:.3f}\n\n"
+                            f"Shadow period ends: **{shadow_end.isoformat()}** "
+                            f"(10 business days from today).\n\n"
+                            f"During shadow the strategy will be called every day and its "
+                            f"targets logged for analysis, but allocation remains zero. "
+                            f"On {shadow_end.isoformat()} the daily runner graduates it to "
+                            f"equal-split HRP weight; the weekly refit takes over from there.\n\n"
+                            f"```python\n{proposal.code}\n```"
+                        )
+                        logger.info(
+                            "monthly review: AI strategy '%s' applied. "
+                            "Sharpe=%.2f DSR=%.3f",
+                            proposal.name, sandbox.sharpe, sandbox.dsr,
+                        )
+                        # Persist to STRATEGY_LIBRARY.md so next month's analyst
+                        # sees this strategy in its canonical catalog.
+                        append_accepted_strategy_to_library(
+                            review_date=for_date,
+                            proposal=proposal,
+                            sharpe=sandbox.sharpe,
+                            max_drawdown=sandbox.max_drawdown,
+                            dsr=sandbox.dsr,
+                        )
                 else:
                     recommendations.append(
                         f"❌ **AI strategy rejected**: {sandbox.rejection_reason}\n\n"
@@ -709,44 +741,53 @@ def run_monthly_review(
                         proposal.name, sandbox.rejection_reason,
                     )
 
-        # -------- Always append to MEMORY.md (success, rejection, or no proposal)
-        try:
-            if ai_report.proposed_strategy is None:
-                outcome_label = "no_proposal"
-                sandbox_summary = "(no proposal made)"
-            elif ai_report.proposed_strategy.name in (current_state.ai_strategy_names or []):
-                outcome_label = "duplicate_skipped"
-                sandbox_summary = "Name already active — skipped sandbox."
-            elif bars is None or bars.empty:
-                outcome_label = "no_bars"
-                sandbox_summary = "Bars unavailable — sandbox not run."
-            elif sandbox.passed_gates:  # type: ignore[possibly-undefined]
-                outcome_label = "accepted"
-                sandbox_summary = (
-                    f"Sharpe={sandbox.sharpe:.3f}, "
-                    f"MaxDD={sandbox.max_drawdown:.1%}, "
-                    f"DSR={sandbox.dsr:.3f} — passed all gates."
-                )
-            else:
-                outcome_label = "rejected"
-                sandbox_summary = (
-                    f"Sharpe={sandbox.sharpe:.3f}, "
-                    f"MaxDD={sandbox.max_drawdown:.1%}, "
-                    f"DSR={sandbox.dsr:.3f}. "
-                    f"Reason: {sandbox.rejection_reason}"
-                )
-
-            append_memory_entry(
-                review_date=for_date,
-                analysis=ai_report.analysis,
-                proposal=ai_report.proposed_strategy,
-                outcome=outcome_label,
-                sandbox_details=sandbox_summary,
-                grid_search_summary=grid_search_summary,
+        # -------- Append to MEMORY.md (success, rejection, or no proposal)
+        # ai_only re-runs skip this — the original monthly run already
+        # appended its entry; a re-run would duplicate it and confuse
+        # next month's analyst.
+        if ai_only:
+            logger.info(
+                "monthly review (--ai-only): skipping MEMORY.md append "
+                "(original run already wrote its entry)"
             )
-        except Exception as mem_err:
-            # MEMORY.md write failure must not break the review.
-            logger.warning("ai_analyst: failed to append MEMORY.md entry: %s", mem_err)
+        else:
+            try:
+                if ai_report.proposed_strategy is None:
+                    outcome_label = "no_proposal"
+                    sandbox_summary = "(no proposal made)"
+                elif ai_report.proposed_strategy.name in (current_state.ai_strategy_names or []):
+                    outcome_label = "duplicate_skipped"
+                    sandbox_summary = "Name already active — skipped sandbox."
+                elif bars is None or bars.empty:
+                    outcome_label = "no_bars"
+                    sandbox_summary = "Bars unavailable — sandbox not run."
+                elif sandbox.passed_gates:  # type: ignore[possibly-undefined]
+                    outcome_label = "accepted"
+                    sandbox_summary = (
+                        f"Sharpe={sandbox.sharpe:.3f}, "
+                        f"MaxDD={sandbox.max_drawdown:.1%}, "
+                        f"DSR={sandbox.dsr:.3f} — passed all gates."
+                    )
+                else:
+                    outcome_label = "rejected"
+                    sandbox_summary = (
+                        f"Sharpe={sandbox.sharpe:.3f}, "
+                        f"MaxDD={sandbox.max_drawdown:.1%}, "
+                        f"DSR={sandbox.dsr:.3f}. "
+                        f"Reason: {sandbox.rejection_reason}"
+                    )
+
+                append_memory_entry(
+                    review_date=for_date,
+                    analysis=ai_report.analysis,
+                    proposal=ai_report.proposed_strategy,
+                    outcome=outcome_label,
+                    sandbox_details=sandbox_summary,
+                    grid_search_summary=grid_search_summary,
+                )
+            except Exception as mem_err:
+                # MEMORY.md write failure must not break the review.
+                logger.warning("ai_analyst: failed to append MEMORY.md entry: %s", mem_err)
 
     except RuntimeError as e:
         # ANTHROPIC_API_KEY not set — not a bug, just not configured yet.
@@ -757,7 +798,11 @@ def run_monthly_review(
         logger.info("ai analyst skipped (no API key): %s", e)
     except Exception as e:
         # Any other error — log and continue so the email still goes out.
-        recommendations.append(f"_AI analyst failed: {type(e).__name__}: {e}_")
+        # format_ai_error classifies the failure (403 / connection / other)
+        # and includes the --ai-only re-run recipe so the operator can
+        # recover with one command.
+        from quant.agent.ai_analyst import format_ai_error
+        recommendations.append(format_ai_error(e))
         logger.exception("ai analyst failed")
 
     # -------- 5. Render + send -----------------------------------------------
@@ -785,11 +830,27 @@ def cli_run() -> None:
         "--no-apply", action="store_true",
         help="run the improver but never apply (review only)",
     )
+    parser.add_argument(
+        "--ai-only", action="store_true",
+        help=(
+            "Re-run the AI analyst without mutating any state. Use this "
+            "to recover from a transient Anthropic failure (HTTP 403, "
+            "connection reset, etc.): switch VPN region, then "
+            "`quant-monthly-review --for-date=YYYY-MM-DD --ai-only`. "
+            "Skips xsec auto-apply, AI strategy acceptance, MEMORY.md "
+            "and STRATEGY_LIBRARY.md appends — the original monthly "
+            "run already handled all of those, so a re-run would "
+            "duplicate entries. The analyst's narrative IS re-rendered "
+            "and emailed."
+        ),
+    )
     args = parser.parse_args()
     for_date = date.fromisoformat(args.for_date) if args.for_date else None
     try:
         subject, _ = run_monthly_review(
-            for_date=for_date, auto_apply=not args.no_apply,
+            for_date=for_date,
+            auto_apply=not args.no_apply,
+            ai_only=args.ai_only,
         )
         print(f"[agent] monthly review sent: {subject}")
     except Exception as e:

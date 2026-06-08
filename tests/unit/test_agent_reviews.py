@@ -203,7 +203,7 @@ def test_monthly_metrics_top10_movers() -> None:
     m = monthly_mod._compute_monthly_metrics(runs, eq)
     # Top gainers should be S0..S4 (all +20%, ties broken by sort order).
     gainers = [g["symbol"] for g in m["top10_gainers_month"]]
-    losers = [l["symbol"] for l in m["top10_losers_month"]]
+    losers = [row["symbol"] for row in m["top10_losers_month"]]
     assert set(gainers[:5]) == {"S0", "S1", "S2", "S3", "S4"}
     assert set(losers[:5]) == {"S10", "S11", "S12", "S13", "S14"}
 
@@ -378,6 +378,125 @@ def test_weekly_review_refits_hrp_when_enabled(monkeypatch, tmp_path: Path) -> N
     body = sender.sent[0]["body_text"]
     assert "HRP weights" in body
     assert "sma_crossover_50_200" in body
+
+
+def test_weekly_review_ai_only_does_not_touch_state(monkeypatch, tmp_path: Path) -> None:
+    """T-fix B: refit_hrp=False (the --ai-only path) must NOT save state."""
+    from quant.agent import weekly_review as weekly_module
+    from quant.agent.ensemble import EnsembleState, load_ensemble_state, save_ensemble_state
+
+    state_path = tmp_path / "state.json"
+    baseline = EnsembleState()
+    save_ensemble_state(baseline, path=state_path)
+    baseline_mtime = state_path.stat().st_mtime
+
+    # If anything mutated state, the test would fail because refit_hrp_weights
+    # would be called — assert it ISN'T.
+    def _explode(*a, **kw):  # noqa: ANN002, ANN003
+        raise AssertionError(
+            "refit_hrp_weights must NOT be called when refit_hrp=False"
+        )
+    monkeypatch.setattr(weekly_module, "refit_hrp_weights", _explode)
+
+    _save_daily(tmp_path, date(2024, 6, 7))
+    sender = _RecordingEmail()
+    weekly_module.run_weekly_review(
+        for_date=date(2024, 6, 7),
+        runs_dir=tmp_path,
+        email_sender=sender,
+        state_path=state_path,
+        refit_hrp=False,         # the --ai-only setting
+        enable_ai_analyst=False,
+    )
+    # State file untouched: same mtime, same content.
+    assert state_path.stat().st_mtime == baseline_mtime
+    loaded = load_ensemble_state(path=state_path)
+    assert loaded.hrp_weights == baseline.hrp_weights
+
+
+def test_weekly_cli_ai_only_flag_threads_through(monkeypatch) -> None:
+    """The --ai-only CLI flag must reach run_weekly_review as refit_hrp=False."""
+    import sys
+
+    from quant.agent import weekly_review as weekly_module
+    captured: dict = {}
+
+    def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return "fake subject"
+
+    monkeypatch.setattr(weekly_module, "run_weekly_review", _fake_run)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["quant-weekly-review", "--for-date=2024-06-07", "--ai-only"],
+    )
+    weekly_module.cli_run()
+    assert captured["refit_hrp"] is False
+    assert captured["for_date"] == date(2024, 6, 7)
+
+
+def test_monthly_review_ai_only_skips_state_writes(monkeypatch, tmp_path: Path) -> None:
+    """T-fix B: --ai-only on monthly must skip ALL state mutations:
+    no xsec auto-apply, no AI strategy acceptance, no MEMORY/LIBRARY appends.
+    Verified by checking the ensemble_state.json mtime is unchanged AND
+    that append_memory_entry / append_accepted_strategy_to_library were
+    never called.
+    """
+    from quant.agent import monthly_review as monthly_module
+    from quant.agent.ensemble import EnsembleState, save_ensemble_state
+
+    state_path = tmp_path / "state.json"
+    save_ensemble_state(EnsembleState(), path=state_path)
+    baseline_mtime = state_path.stat().st_mtime
+
+    def _no_call(*a, **kw):
+        raise AssertionError(
+            f"state mutator called with --ai-only: a={a}, kw={kw}"
+        )
+
+    # Block any write paths that ai_only must NOT trigger.
+    monkeypatch.setattr(monthly_module, "append_memory_entry", _no_call)
+    monkeypatch.setattr(
+        monthly_module, "append_accepted_strategy_to_library", _no_call,
+    )
+    # The improver still runs (its output goes to the analyst prompt) —
+    # but auto-apply is forced off, so even a winning candidate doesn't
+    # mutate state.
+    _save_daily(tmp_path, date(2024, 6, 28))
+    sender = _RecordingEmail()
+    monthly_module.run_monthly_review(
+        for_date=date(2024, 6, 28),
+        runs_dir=tmp_path,
+        email_sender=sender,
+        params_path=state_path,
+        ai_only=True,
+        enable_ai_analyst=False,    # don't need the AI for this test
+        cache=type("_C", (), {"get_daily_bars": lambda *a, **k: pd.DataFrame()})(),
+        universe=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+    )
+    assert state_path.stat().st_mtime == baseline_mtime
+
+
+def test_monthly_cli_ai_only_flag_threads_through(monkeypatch) -> None:
+    """The --ai-only CLI flag must reach run_monthly_review as ai_only=True."""
+    import sys
+
+    from quant.agent import monthly_review as monthly_module
+    captured: dict = {}
+
+    def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return "fake subject", None
+
+    monkeypatch.setattr(monthly_module, "run_monthly_review", _fake_run)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["quant-monthly-review", "--for-date=2024-06-28", "--ai-only"],
+    )
+    monthly_module.cli_run()
+    assert captured["ai_only"] is True
+    assert captured["auto_apply"] is True   # --no-apply was NOT passed
+    assert captured["for_date"] == date(2024, 6, 28)
 
 
 # ---------------------------------------------------------------------------
