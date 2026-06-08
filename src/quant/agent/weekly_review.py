@@ -128,6 +128,27 @@ def run_weekly_review(
         if eq is not None:
             equity_curve[d] = float(eq)
 
+    # -------- 1b. Benchmarks (best-effort) --------
+    # SPY + QQQ close-to-close over the week's equity-curve window so the
+    # render can show portfolio return vs market context. Failures here
+    # are warned and ignored — never block the email.
+    benchmarks: dict[str, float] = {}
+    if equity_curve:
+        try:
+            from quant.util.benchmarks import fetch_benchmark_returns
+
+            bc = cache or BarsCache(
+                client=AlpacaDataClient(), root=Path("data/bars/daily"),
+            )
+            eq_dates = sorted(equity_curve.keys())
+            benchmarks = fetch_benchmark_returns(bc, eq_dates[0], eq_dates[-1])
+        except Exception as e:
+            logger.warning(
+                "weekly_review: benchmark fetch failed (%s: %s) — "
+                "benchmark row will be omitted",
+                type(e).__name__, e,
+            )
+
     # -------- 2. HRP refit (best-effort; failure surfaces in the email) --------
     refit_notes: list[str] = []
     hrp_diag: dict = {}     # captured here so the AI analyst can reference it
@@ -263,6 +284,7 @@ def run_weekly_review(
         daily_runs=daily_runs,
         equity_curve=equity_curve,
         notes=notes,
+        benchmarks=benchmarks,
     )
     sender = email_sender or EmailSender()
     sender.send(subject=subject, body_text=body, body_html=_markdown_to_html(body))

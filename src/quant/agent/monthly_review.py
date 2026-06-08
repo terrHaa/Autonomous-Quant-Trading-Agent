@@ -378,6 +378,28 @@ def run_monthly_review(
         if eq is not None:
             equity_curve[d] = float(eq)
 
+    # -------- 1b. Benchmarks (best-effort) -----------------------------------
+    # SPY + QQQ close-to-close over the month so the email surfaces relative
+    # performance vs the broad market and Nasdaq. Best-effort: failures do
+    # not block the email.
+    benchmarks: dict[str, float] = {}
+    if equity_curve:
+        try:
+            from quant.util.benchmarks import fetch_benchmark_returns
+
+            bc_for_bench = cache or BarsCache(
+                client=AlpacaDataClient(), root=Path("data/bars/daily"),
+            )
+            eq_dates = sorted(equity_curve.keys())
+            benchmarks = fetch_benchmark_returns(
+                bc_for_bench, eq_dates[0], eq_dates[-1],
+            )
+        except Exception as e:
+            logger.warning(
+                "monthly_review: benchmark fetch failed (%s: %s)",
+                type(e).__name__, e,
+            )
+
     # -------- 2. Math-based grid search (xsec momentum params) ---------------
     current_state = load_ensemble_state(path=params_path)
     current_xsec_params = StrategyParams(
@@ -469,6 +491,7 @@ def run_monthly_review(
             daily_runs=daily_runs,
             equity_curve=equity_curve,
             recommendations=recommendations,
+            benchmarks=benchmarks,
         )
         sender = email_sender or EmailSender()
         sender.send(subject=subject, body_text=body, body_html=_markdown_to_html(body))
@@ -811,6 +834,7 @@ def run_monthly_review(
         daily_runs=daily_runs,
         equity_curve=equity_curve,
         recommendations=recommendations,
+        benchmarks=benchmarks,
     )
     sender = email_sender or EmailSender()
     sender.send(subject=subject, body_text=body, body_html=_markdown_to_html(body))

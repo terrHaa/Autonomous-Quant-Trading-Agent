@@ -29,10 +29,25 @@ def render_daily_report(
     strategy_name: str,
     target_weights: dict[str, float],
     execution_report: ExecutionReport,
+    account_equity_after: float | None = None,
+    benchmarks: dict[str, float] | None = None,
 ) -> tuple[str, str]:
     """Render today's report. Returns (subject, markdown_body).
 
     The subject is short (~70 chars max so it doesn't wrap in inbox lists).
+
+    Parameters
+    ----------
+    account_equity_after
+        End-of-session equity (post-close). When provided alongside
+        ``execution_report.account_equity_before`` (which captures the
+        pre-trade equity at 09:35 ET), the report computes today's
+        portfolio return and shows it next to the benchmarks. Optional
+        because some test paths don't have it.
+    benchmarks
+        ``{"SPY": pct_return, "QQQ": pct_return}`` for the trade day's
+        close-to-close move. Either key may be absent if the cache
+        couldn't price it; the renderer just omits that row.
     """
     # Count both NEW entries (status=submitted in OTO bracket) AND KEPT
     # entries (carryforward positions where only the stop was re-armed).
@@ -64,8 +79,58 @@ def render_daily_report(
     lines.append(
         f"**Account equity (pre-trade):** ${execution_report.account_equity_before:,.2f}  "
     )
+    if account_equity_after is not None:
+        lines.append(
+            f"**Account equity (post-close):** ${account_equity_after:,.2f}  "
+        )
     lines.append(f"**Dry run:** {execution_report.dry_run}")
     lines.append("")
+
+    # --- Today's performance vs benchmarks ---
+    # Compares the portfolio's session return (pre-trade open → post-close)
+    # to SPY and QQQ close-to-close on the same trading day. Without this
+    # context a +0.4% day looks fine in isolation but is actually -0.6%
+    # vs a benchmark that did +1.0%.
+    portfolio_ret: float | None = None
+    if (
+        account_equity_after is not None
+        and execution_report.account_equity_before > 0
+    ):
+        portfolio_ret = (
+            account_equity_after / execution_report.account_equity_before - 1.0
+        )
+
+    if portfolio_ret is not None or benchmarks:
+        lines.append("## Today vs benchmarks")
+        lines.append("")
+        lines.append("| Book | Return |")
+        lines.append("|---|---|")
+        if portfolio_ret is not None:
+            lines.append(f"| **Portfolio** | **{portfolio_ret:+.2%}** |")
+        if benchmarks:
+            for sym in ("SPY", "QQQ"):
+                if sym in benchmarks:
+                    label = (
+                        "SPY (S&P 500)" if sym == "SPY"
+                        else "QQQ (Nasdaq 100)"
+                    )
+                    bench_ret = benchmarks[sym]
+                    line = f"| {label} | {bench_ret:+.2%} |"
+                    if portfolio_ret is not None:
+                        delta = portfolio_ret - bench_ret
+                        sign = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                        line = (
+                            f"| {label} | {bench_ret:+.2%} "
+                            f"({sign} {abs(delta):.2%} vs portfolio) |"
+                        )
+                    lines.append(line)
+        if portfolio_ret is None and benchmarks:
+            lines.append("")
+            lines.append(
+                "_(Portfolio return not available — post-close equity wasn't "
+                "captured. Benchmarks shown as market context.)_"
+            )
+        lines.append("")
 
     # --- Target book ---
     lines.append("## Target weights")
@@ -132,12 +197,21 @@ def render_weekly_report(
     daily_runs: list[dict[str, Any]],
     equity_curve: dict[date, float] | None = None,
     notes: str = "",
+    benchmarks: dict[str, float] | None = None,
 ) -> tuple[str, str]:
     """Render a weekly summary.
 
     ``daily_runs`` is a list of the per-day payloads loaded from
     ``log.load_daily_run``. ``equity_curve`` is optional; if provided
     we add a returns line.
+
+    Parameters
+    ----------
+    benchmarks
+        ``{"SPY": pct, "QQQ": pct}`` close-to-close returns over the
+        same window as the equity curve. Surfaced as a side-by-side
+        comparison row so the operator can see relative performance
+        at a glance.
     """
     subject = f"quant agent — weekly review — week ending {week_ending.isoformat()}"
 
@@ -145,15 +219,48 @@ def render_weekly_report(
     lines.append(f"# Quant agent — weekly review — week ending {week_ending.isoformat()}")
     lines.append("")
     lines.append(f"**Runs included:** {len(daily_runs)} trading days  ")
+    portfolio_ret: float | None = None
     if equity_curve and len(equity_curve) >= 2:
         eq_dates = sorted(equity_curve.keys())
         start_eq = equity_curve[eq_dates[0]]
         end_eq = equity_curve[eq_dates[-1]]
         pnl = end_eq - start_eq
-        ret_pct = (end_eq / start_eq - 1) if start_eq > 0 else 0.0
+        portfolio_ret = (end_eq / start_eq - 1) if start_eq > 0 else 0.0
         lines.append(f"**Equity:** ${start_eq:,.2f} → ${end_eq:,.2f}  ")
-        lines.append(f"**P&L this week:** ${pnl:+,.2f} ({ret_pct:+.2%})  ")
+        lines.append(f"**P&L this week:** ${pnl:+,.2f} ({portfolio_ret:+.2%})  ")
     lines.append("")
+
+    # --- Vs benchmarks ---
+    # Side-by-side comparison: portfolio return vs SPY (S&P 500 proxy) and
+    # QQQ (Nasdaq 100 proxy) over the SAME date window. Includes the
+    # relative (out/under)performance vs each benchmark — that's the
+    # number that actually tells the operator whether the strategy is
+    # adding value vs just riding the market up.
+    if benchmarks or portfolio_ret is not None:
+        lines.append("## Vs benchmarks (same window)")
+        lines.append("")
+        lines.append("| Book | Return |")
+        lines.append("|---|---|")
+        if portfolio_ret is not None:
+            lines.append(f"| **Portfolio** | **{portfolio_ret:+.2%}** |")
+        if benchmarks:
+            for sym in ("SPY", "QQQ"):
+                if sym in benchmarks:
+                    label = (
+                        "SPY (S&P 500)" if sym == "SPY"
+                        else "QQQ (Nasdaq 100)"
+                    )
+                    bench_ret = benchmarks[sym]
+                    line = f"| {label} | {bench_ret:+.2%} |"
+                    if portfolio_ret is not None:
+                        delta = portfolio_ret - bench_ret
+                        sign = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                        line = (
+                            f"| {label} | {bench_ret:+.2%} "
+                            f"({sign} {abs(delta):.2%} vs portfolio) |"
+                        )
+                    lines.append(line)
+        lines.append("")
 
     # Aggregate stats from the daily runs. Count only NEW broker entries
     # ("submitted") — "kept" rows are carryforward and don't represent
@@ -215,9 +322,14 @@ def render_monthly_report(
     daily_runs: list[dict[str, Any]],
     equity_curve: dict[date, float] | None = None,
     recommendations: list[str] | None = None,
+    benchmarks: dict[str, float] | None = None,
 ) -> tuple[str, str]:
     """Render a monthly summary. Like the weekly but with a Recommendations
-    section populated by the auto-improver."""
+    section populated by the auto-improver.
+
+    ``benchmarks`` follows the same shape as in ``render_weekly_report``;
+    the comparison covers the full monthly window.
+    """
     subject = (
         f"quant agent — monthly review — "
         f"month ending {month_ending.isoformat()}"
@@ -228,6 +340,7 @@ def render_monthly_report(
         week_ending=month_ending,
         daily_runs=daily_runs,
         equity_curve=equity_curve,
+        benchmarks=benchmarks,
     )
     body = body.replace(
         "quant agent — weekly review",

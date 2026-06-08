@@ -916,12 +916,25 @@ def run_daily_report(
     for_date: date | None = None,
     runs_dir: Path | None = None,
     email_sender: EmailSender | None = None,
+    executor: AlpacaExecutor | None = None,
+    cache: BarsCache | None = None,
 ) -> str:
     """Render today's report and email it. Returns the subject sent.
 
     Loads the persisted JSON from earlier in the day, renders markdown,
     emails to the configured REPORT_TO recipient. Raises if no run was
     persisted for ``for_date``.
+
+    Also fetches:
+      - End-of-session equity from Alpaca (the run JSON only captured
+        pre-trade equity at 09:35 ET; the daily report fires after the
+        close so a fresh equity read gives us the actual session return).
+      - Same-day SPY + QQQ close-to-close returns so the email surfaces
+        portfolio performance vs the broad market.
+
+    ``executor`` and ``cache`` are injectable for tests. Production
+    leaves both None — the real Alpaca executor and the standard
+    bars cache are constructed lazily.
     """
     for_date = for_date or date.today()
     payload = load_daily_run(for_date, runs_dir=runs_dir)
@@ -929,6 +942,43 @@ def run_daily_report(
         raise RuntimeError(
             f"no daily run record for {for_date.isoformat()} at "
             f"{runs_dir or DEFAULT_RUNS_DIR}. Did the morning trade routine run?"
+        )
+
+    # --- End-of-session equity + benchmark fetch (best-effort) ---
+    # Both are best-effort: failures here must NOT block the report from
+    # going out. The email is the operator's signal that the pipeline ran;
+    # losing it because a benchmark fetch flaked would be worse than
+    # losing the benchmark row.
+    equity_after: float | None = None
+    benchmarks: dict[str, float] = {}
+    try:
+        ex = executor or AlpacaExecutor()
+        equity_after = ex.get_equity()
+    except Exception as e:
+        logger.warning(
+            "run_daily_report: could not fetch post-close equity "
+            "(%s: %s) — daily portfolio return will be omitted",
+            type(e).__name__, e,
+        )
+    try:
+        from quant.util.benchmarks import fetch_benchmark_returns
+
+        bc = cache or BarsCache(
+            client=AlpacaDataClient(), root=Path("data/bars/daily"),
+        )
+        # Window: prior trading day → today (close-to-close). Calendar
+        # math: 5 days back covers a long-weekend gap. The helper
+        # close-to-closes whatever it gets, so a wider window just means
+        # we use the FIRST and LAST closes in it — correct for the
+        # "today's daily return" semantics.
+        benchmarks = fetch_benchmark_returns(
+            bc, for_date - timedelta(days=5), for_date,
+        )
+    except Exception as e:
+        logger.warning(
+            "run_daily_report: benchmark fetch failed "
+            "(%s: %s) — benchmark row will be omitted",
+            type(e).__name__, e,
         )
 
     # Reconstitute just enough of ExecutionReport for the renderer.
@@ -954,6 +1004,8 @@ def run_daily_report(
         strategy_name=payload.get("strategy_name", "(unknown)"),
         target_weights=payload.get("target_weights", {}),
         execution_report=report_view,
+        account_equity_after=equity_after,
+        benchmarks=benchmarks,
     )
 
     sender = email_sender or EmailSender()
