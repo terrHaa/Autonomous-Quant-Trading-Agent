@@ -8,6 +8,7 @@ or on our keys being correct. Real-API verification lives in
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from quant.data.alpaca_client import (
@@ -87,3 +88,54 @@ def test_empty_bars_frame_has_correct_shape() -> None:
     assert df.empty
     assert tuple(df.columns) == BAR_COLUMNS
     assert df.index.names == ["symbol", "timestamp"]
+
+
+# ---------------------------------------------------------------------------
+# T-audit fix: data feed must be pinned to IEX
+# ---------------------------------------------------------------------------
+
+
+def test_get_daily_bars_pins_feed_to_iex(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard for the SIP-recent-data gate.
+
+    Without an explicit feed=IEX, alpaca-py routes recent data through SIP,
+    which the free Alpaca subscription doesn't permit. That manifested in
+    production as the benchmark fetch failing with:
+        APIError: subscription does not permit querying recent SIP data
+    Lock in the IEX pin so a future alpaca-py refactor can't silently
+    regress this.
+    """
+    from datetime import date
+
+    from alpaca.data.enums import DataFeed
+
+    from quant.data.alpaca_client import AlpacaCredentials, AlpacaDataClient
+
+    captured: dict = {}
+
+    class _FakeAlpacaClient:
+        def __init__(self, **_kw):
+            pass
+        def get_stock_bars(self, request):
+            captured["request"] = request
+            # Return an object with a .df attribute that's an empty DataFrame
+            # — exercises the empty-frame return path.
+            class _R:
+                df = pd.DataFrame()
+            return _R()
+
+    # Patch the SDK constructor to avoid real auth.
+    import quant.data.alpaca_client as alpaca_module
+    monkeypatch.setattr(alpaca_module, "StockHistoricalDataClient", _FakeAlpacaClient)
+
+    client = AlpacaDataClient(
+        credentials=AlpacaCredentials(api_key="x", api_secret="y"),
+    )
+    client.get_daily_bars(["AAPL"], date(2024, 6, 1), date(2024, 6, 10))
+
+    req = captured["request"]
+    assert req.feed == DataFeed.IEX, (
+        f"StockBarsRequest must be built with feed=DataFeed.IEX; "
+        f"got feed={req.feed!r}. This regression lets the free-tier "
+        f"Alpaca subscription's SIP gate fail benchmark fetches."
+    )

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import pandas as pd
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -170,6 +171,18 @@ class AlpacaDataClient:
             # you ever need raw prices for corporate-action analysis, this is
             # the knob.
             adjustment="all",
+            # Pin the feed to IEX. The free / "Basic" Alpaca subscription
+            # ONLY permits IEX; SIP (the consolidated feed) requires a paid
+            # plan. Without this pin alpaca-py routes "recent" data through
+            # SIP by default and the request fails with:
+            #   APIError: "subscription does not permit querying recent SIP data"
+            # IEX covers ~3% of US equity volume but its DAILY bars track
+            # the consolidated bars to within a tick on S&P 500 names —
+            # which is what every strategy here cares about. For tick or
+            # quote-level work the free tier wouldn't be appropriate
+            # anyway. Pinning explicitly also makes the per-symbol gap-fill
+            # in BarsCache deterministic across alpaca-py version bumps.
+            feed=DataFeed.IEX,
         )
 
         # The SDK returns a BarSet object with a `.df` property that hands
