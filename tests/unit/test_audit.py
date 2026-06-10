@@ -503,3 +503,166 @@ def test_render_email_fail_banner_with_details() -> None:
     assert "AUDIT FAILED" in body
     assert "Details for failing checks" in body
     assert "\"why\"" in body  # JSON-rendered detail
+
+
+# ---------------------------------------------------------------------------
+# T-bug 2026-06-09: intent-aware direction-mismatch check (Fix 4)
+# ---------------------------------------------------------------------------
+
+
+def _save_run_with_target_weights(
+    tmp_path: Path, for_date: date, target_weights: dict[str, float],
+) -> None:
+    """Persist a minimal run JSON the audit can read for target weights."""
+    import json
+    payload = {
+        "date": for_date.isoformat(),
+        "strategy_name": "test-ensemble",
+        "strategy_params": {},
+        "target_weights": target_weights,
+        "signal_prices": {},
+        "execution_report": {
+            "env": "paper",
+            "account_equity_before": 100_000.0,
+            "positions_before": {},
+            "target_weights": target_weights,
+            "proposed_orders": [],
+            "submitted_orders": [],
+            "dry_run": False,
+            "timestamp": "2026-06-09T13:35:00+00:00",
+            "notes": "",
+        },
+    }
+    (tmp_path / f"{for_date.isoformat()}.json").write_text(json.dumps(payload))
+
+
+def test_broker_direction_mismatch_flags_short_when_target_is_long(tmp_path: Path) -> None:
+    """The 2026-06-09 AMD bug: broker says -9 short, intent was long.
+    Audit must hard-fail on this so the operator catches it on day 1."""
+    today = date(2024, 6, 3)
+    _save_run_with_target_weights(tmp_path, today, {"AMD": 0.05})  # long intent
+    positions = {"AMD": -9}                                          # but actually short
+    orders = []   # no stops to worry about
+    ex = _FakeExecutor(client=_FakeBrokerClient(positions=positions, open_orders=orders))
+    check = _check_broker_reconciliation(today, runs_dir=tmp_path, executor=ex)
+    assert not check.passed
+    assert "direction mismatch" in check.message.lower()
+    assert "AMD" in check.message
+    # Details surface it for the operator email.
+    assert any("AMD" in row for row in check.details["direction_mismatch"])
+
+
+def test_broker_direction_mismatch_flags_long_when_target_is_short(tmp_path: Path) -> None:
+    """Symmetric: intent was short but broker shows long. Same alarm.
+    This branch is what makes the check forward-compatible with future
+    shorting strategies — it catches both directions."""
+    today = date(2024, 6, 3)
+    _save_run_with_target_weights(tmp_path, today, {"NVDA": -0.05})  # short intent
+    positions = {"NVDA": 10}                                          # but actually long
+    ex = _FakeExecutor(client=_FakeBrokerClient(positions=positions, open_orders=[
+        _fake_order("NVDA", qty=10, tif="gtc"),
+    ]))
+    check = _check_broker_reconciliation(today, runs_dir=tmp_path, executor=ex)
+    assert not check.passed
+    assert "direction mismatch" in check.message.lower()
+    assert "NVDA" in check.message
+
+
+def test_broker_short_with_matching_short_intent_passes(tmp_path: Path) -> None:
+    """Forward-compatibility: when a strategy emits a short signal,
+    the broker holding a matching short must NOT trip the check.
+    Without this, enabling shorting would force ripping out the check."""
+    today = date(2024, 6, 3)
+    _save_run_with_target_weights(tmp_path, today, {"AAPL": -0.10})   # short intent
+    positions = {"AAPL": -50}                                          # matches: short held
+    # Pretend we have a buy-stop on the short (audit doesn't care which side).
+    orders = [_fake_order("AAPL", qty=50, tif="gtc")]
+    ex = _FakeExecutor(client=_FakeBrokerClient(positions=positions, open_orders=orders))
+    check = _check_broker_reconciliation(today, runs_dir=tmp_path, executor=ex)
+    # Direction-mismatch should be EMPTY.
+    assert check.details["direction_mismatch"] == []
+
+
+def test_broker_long_with_long_intent_passes(tmp_path: Path) -> None:
+    """Baseline sanity: standard long position with long target → pass."""
+    today = date(2024, 6, 3)
+    _save_run_with_target_weights(tmp_path, today, {"AAPL": 0.10})
+    positions = {"AAPL": 50}
+    orders = [_fake_order("AAPL", qty=50, tif="gtc")]
+    ex = _FakeExecutor(client=_FakeBrokerClient(positions=positions, open_orders=orders))
+    check = _check_broker_reconciliation(today, runs_dir=tmp_path, executor=ex)
+    assert check.details["direction_mismatch"] == []
+
+
+# ---------------------------------------------------------------------------
+# T-bug 2026-06-09: SMTP-only error log is transient, must not flag (Fix 5)
+# ---------------------------------------------------------------------------
+
+
+def test_smtp_only_traceback_is_treated_as_transient(tmp_path: Path) -> None:
+    """A .err that contains ONLY SMTP disconnect tracebacks must NOT
+    flag the audit. The retry layer already gave SMTP 4 attempts; if
+    all fail, the next cron fire tries fresh. Flagging it daily is
+    noise, not signal.
+    """
+    fp = tmp_path / "daily-report.err"
+    fp.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/path/smtplib.py", line 261, in __init__\n'
+        '    (code, msg) = self.connect(host, port)\n'
+        "smtplib.SMTPServerDisconnected: Connection unexpectedly closed\n"
+    )
+    check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+    assert check.passed, (
+        f"SMTP-only flake should be ignored; got: {check.message}"
+    )
+    # But the operator should still see it noted.
+    assert "daily-report.err" in check.message
+    assert check.details["skipped_transient"] == ["daily-report.err"]
+
+
+def test_connection_reset_only_traceback_is_treated_as_transient(tmp_path: Path) -> None:
+    """TLS handshake / connection reset traces are also transient
+    (typical VPN re-establishment behavior)."""
+    fp = tmp_path / "daily-trade.err"
+    fp.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/path/adapters.py", line 711, in send\n'
+        "    raise ConnectionError(err, request=request)\n"
+        "ConnectionResetError: [Errno 54] Connection reset by peer\n"
+    )
+    check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+    assert check.passed
+
+
+def test_mixed_transient_and_real_error_still_flags(tmp_path: Path) -> None:
+    """If a file contains BOTH a transient AND a genuine bug, the
+    transient must not mask the bug. The audit flags it."""
+    fp = tmp_path / "daily-trade.err"
+    fp.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/path/foo.py", line 1, in <module>\n'
+        "    1/0\n"
+        "ZeroDivisionError: division by zero\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "/path/smtplib.py", line 261, in __init__\n'
+        "smtplib.SMTPServerDisconnected: Connection unexpectedly closed\n"
+    )
+    check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+    assert not check.passed
+    assert "daily-trade.err" in check.message
+
+
+def test_timeout_error_only_is_transient(tmp_path: Path) -> None:
+    """`TimeoutError: timed out` is the classic SMTP-during-send leaf;
+    treat as transient."""
+    fp = tmp_path / "daily-report.err"
+    fp.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/path/socket.py", line 859, in create_connection\n'
+        "    sock.connect(sa)\n"
+        "TimeoutError: timed out\n"
+    )
+    check = _check_recent_error_logs(log_dir=tmp_path, hours=24)
+    assert check.passed

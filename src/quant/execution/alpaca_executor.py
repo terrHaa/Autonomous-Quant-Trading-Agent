@@ -240,20 +240,28 @@ class AlpacaExecutor:
         """Cancel open orders the agent owns. Returns (n_cancelled, error).
 
         Distinct from ``self._client.cancel_orders()`` which would cancel
-        EVERY open order on the account, including any manual orders the
-        operator placed. This version uses two heuristics combined:
+        EVERY open order on the account. This version uses three
+        heuristics combined:
 
           1. ``client_order_id`` starts with the agent tag — catches every
              order we DIRECTLY submitted (entries, kept-stops, repair
              stops, close-outs).
-          2. Stop-type order on a symbol we currently hold — catches OTO
-             child stops where the broker generates the id and we can't
-             tag it from our side.
+          2. Any stop-type order — catches OTO child stops (broker-
+             generated client_order_id we can't tag) AND orphan stops on
+             symbols we no longer hold. The original heuristic restricted
+             cancels to stops on currently-held symbols, but that left
+             ORPHAN STOPS (stop on a symbol that closed without the
+             bracket auto-cancelling) lurking — they'd fire on the next
+             down day and DRIVE THE POSITION NEGATIVE (the 2026-06-09 AMD
+             bug). On a single-operator paper account the only stops on
+             the book are ours; canceling all of them daily is correct.
+          3. (legacy fallback) Stop-type order on a held symbol — kept for
+             documentation, subsumed by #2.
 
-        Manual orders OUTSIDE our held positions are preserved. Caveat:
-        if the operator places manual orders on the SAME symbols the
-        agent holds, those orders will be cancelled too. Document this
-        in the executor's docstring.
+        Caveat: if the operator places manual stop orders, those will
+        also be cancelled. The operator has confirmed they don't do that
+        on this account; if that ever changes, switch back to the
+        held-symbols heuristic.
         """
         try:
             from alpaca.trading.enums import QueryOrderStatus
@@ -264,7 +272,6 @@ class AlpacaExecutor:
         except Exception as e:
             return 0, f"could not fetch open orders: {e}"
 
-        held_syms = set(self.get_positions().keys())
         n_cancelled = 0
         cancel_errors: list[str] = []
         for o in open_orders:
@@ -273,7 +280,10 @@ class AlpacaExecutor:
             sym = getattr(o, "symbol", "")
             is_ours = (
                 client_id.startswith(self._AGENT_TAG)
-                or (order_type == "stop" and sym in held_syms)
+                # Cancel ALL stops regardless of held status. Catches orphan
+                # stops that would otherwise drive positions short on the
+                # next down day. See docstring for the bug history.
+                or order_type == "stop"
             )
             if not is_ours:
                 continue
@@ -541,6 +551,66 @@ class AlpacaExecutor:
         now = datetime.now(UTC)
         submitted: list[SubmittedOrder] = []
         max_notional = max_position_weight * equity
+
+        # ---- 0. Short auto-cover ---------------------------------------
+        # T-bug 2026-06-09: AMD ended at -9 short after an orphan stop fired
+        # against a 0 position. submit_daily_rebalance is long-only by
+        # policy (negative target weights are already rejected above) but
+        # the EXECUTION-side enforcement was missing: the plan loop routed
+        # "current_qty < 0, target_qty > 0" through the "new" OTO branch,
+        # which just adds a small long without touching the short. Each
+        # day the short persisted, the new OTO's stop fired intraday and
+        # *added* to the short.
+        #
+        # This guard runs BEFORE the cancel + plan steps. Any short position
+        # is immediately covered with a market buy of |qty|, and removed
+        # from the working `positions` dict so the rest of the flow treats
+        # the symbol as flat. Idempotent: if the cover is queued (market
+        # closed) it'll fill at the next open; the next run sees -X again
+        # and re-submits — Alpaca dedupes by client_order_id (timestamped
+        # per run), so no double-fill.
+        shorts = {sym: qty for sym, qty in positions.items() if qty < 0}
+        if shorts and not dry_run:
+            for sym, qty in sorted(shorts.items()):
+                cover_qty = abs(qty)
+                try:
+                    from alpaca.trading.enums import OrderSide, TimeInForce
+                    from alpaca.trading.requests import MarketOrderRequest
+                    req = MarketOrderRequest(
+                        symbol=sym,
+                        qty=cover_qty,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                        client_order_id=self._make_client_order_id(sym, "short-cover"),
+                    )
+                    resp = self._client.submit_order(req)
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="buy", qty=cover_qty,
+                        status="submitted", role="entry",
+                        alpaca_order_id=str(getattr(resp, "id", None)),
+                        error=(
+                            f"AUTO-COVER: closing short position (was qty={qty}). "
+                            "Long-only policy."
+                        ),
+                    ))
+                    logger.warning(
+                        "short auto-cover: %s was %d short; buy-to-cover %d submitted",
+                        sym, qty, cover_qty,
+                    )
+                except Exception as e:
+                    submitted.append(SubmittedOrder(
+                        symbol=sym, side="buy", qty=cover_qty,
+                        status="failed", role="entry",
+                        error=f"short auto-cover FAILED for qty={qty}: {e}",
+                    ))
+                    logger.error(
+                        "short auto-cover FAILED for %s (qty=%d): %s",
+                        sym, qty, e,
+                    )
+                # Treat the symbol as flat for the rest of the run regardless
+                # of whether the cover order succeeded. Worst case: tomorrow's
+                # run sees the same short again and retries.
+                positions = {k: v for k, v in positions.items() if k != sym}
 
         # ---- 1. Cancel only OUR open orders. ------------------------
         # T3.16: cancel_orders() was indiscriminate — it would kill any

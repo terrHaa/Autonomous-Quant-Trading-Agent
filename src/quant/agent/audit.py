@@ -207,6 +207,30 @@ def _check_broker_reconciliation(
         if actual != q:
             entry_vs_pos.append(f"{sym}: entry_qty={q} → pos_qty={actual}")
 
+    # T-bug 2026-06-09: intent-aware direction check. Compares each broker
+    # position's sign to its target-weight sign in today's run record.
+    # Long-only enforcement is implicit: every current target weight is
+    # >= 0, so a negative position trips immediately (this is how the AMD
+    # short would have been caught on day 1). Forward-compatible with
+    # future shorting strategies: when target_weight < 0, a matching
+    # short position is aligned and passes silently. Catches the symmetric
+    # bug too — "intended short but ended up long".
+    target_weights = payload.get("target_weights", {}) or {}
+    direction_mismatch: list[str] = []
+    for sym, qty in positions.items():
+        target = float(target_weights.get(sym, 0.0))
+        if qty > 0 and target < 0:
+            direction_mismatch.append(
+                f"{sym}: qty={qty} (long) but target weight {target:+.3%} (short)"
+            )
+        elif qty < 0 and target >= 0:
+            # target >= 0 covers both "explicitly long" and "no target,
+            # should be flat". A negative position with no/positive intent
+            # is the AMD bug pattern.
+            direction_mismatch.append(
+                f"{sym}: qty={qty} (short) but target weight {target:+.3%} (long/flat)"
+            )
+
     issues: list[str] = []
     if unprotected:
         issues.append(f"unprotected positions: {sorted(unprotected)}")
@@ -216,6 +240,8 @@ def _check_broker_reconciliation(
         issues.append(f"non-GTC stops (will expire at close): {non_gtc}")
     if qty_mismatch:
         issues.append(f"qty mismatch: {qty_mismatch}")
+    if direction_mismatch:
+        issues.append(f"direction mismatch (position sign ≠ target sign): {direction_mismatch}")
 
     passed = not issues
     if passed:
@@ -240,6 +266,7 @@ def _check_broker_reconciliation(
             "non_gtc": non_gtc,
             "qty_mismatch": qty_mismatch,
             "entry_vs_position_drift": entry_vs_pos,
+            "direction_mismatch": direction_mismatch,
         },
     )
 
@@ -304,18 +331,83 @@ def _check_ensemble_state() -> AuditCheck:
     )
 
 
+# Tracebacks whose ROOT cause is one of these exceptions are treated as
+# "transient noise" and ignored by the error_logs check. The retry layer
+# in quant.util.retry already gave each operation 4 attempts with
+# exponential backoff; when those all fail, the agent writes a traceback
+# and gives up. If the ONLY exception class on the way down is one of
+# these network/SMTP transient classes, the failure is genuinely just a
+# bad-network moment and the audit shouldn't keep flagging it daily.
+#
+# IMPORTANT: a traceback that ALSO contains a non-transient exception
+# (RuntimeError, ValueError, KeyError, etc.) still flags — we only skip
+# the file when ALL the error markers in it are transient.
+_TRANSIENT_TRACEBACK_MARKERS: tuple[str, ...] = (
+    # SMTP — Gmail occasionally drops the handshake under VPN/proxy load.
+    # The retry layer gives it 4 tries; if all fail, this exception is
+    # the leaf. The next daily report fires fresh.
+    "smtplib.SMTPServerDisconnected",
+    # TLS handshake / network reset, common on intermittent VPN tunnels.
+    "TimeoutError: timed out",
+    "ConnectionResetError",
+    "ssl.SSLEOFError",
+)
+
+
+def _is_transient_only_traceback(text: str) -> bool:
+    """True iff every traceback in ``text`` resolves to a transient leaf.
+
+    A traceback is "transient" when its LEAF exception (the bottom line
+    of the call stack — what actually got raised) is in
+    ``_TRANSIENT_TRACEBACK_MARKERS``. Files containing a mix of transient
+    and genuine errors are NOT transient — we'd lose visibility into
+    the genuine ones.
+    """
+    if "Traceback" not in text and "ERROR" not in text:
+        return False
+    lines = text.splitlines()
+    # Find every "Traceback (most recent call last):" block and inspect
+    # what the bottom-most exception line is. Heuristic: the last non-
+    # empty line in the file (or before the next traceback) is the
+    # leaf exception.
+    tb_starts = [
+        i for i, ln in enumerate(lines)
+        if ln.lstrip().startswith("Traceback (most recent call last):")
+    ]
+    if not tb_starts:
+        return False
+    # Block boundaries.
+    tb_starts.append(len(lines))
+    for i in range(len(tb_starts) - 1):
+        block = lines[tb_starts[i]: tb_starts[i + 1]]
+        # Leaf exception = the last non-empty line of the block.
+        leaf = next(
+            (ln for ln in reversed(block) if ln.strip() and "Traceback" not in ln),
+            "",
+        )
+        if not any(marker in leaf for marker in _TRANSIENT_TRACEBACK_MARKERS):
+            return False
+    return True
+
+
 def _check_recent_error_logs(
     log_dir: Path | None = None,
     hours: int = 26,
 ) -> AuditCheck:
-    """Any non-empty .err log with REAL errors modified within `hours`?
+    """Any non-empty .err log with REAL (non-transient) errors modified within `hours`?
 
-    A "real error" means lines containing ERROR, Traceback, Exception,
-    or Failed (case-sensitive). We deliberately IGNORE WARNING-only logs
-    because the retry layer writes WARNING on each transient attempt;
-    when those retries succeed, the run was fine but the .err file is
-    non-empty. Flagging those would cause a false-positive on every
-    network-flaky run.
+    A "real error" means lines containing ERROR or Traceback. We
+    deliberately IGNORE:
+      • WARNING-only logs — the retry layer writes WARNING per transient
+        attempt; when retries succeed, the run was fine but the .err is
+        non-empty. Flagging those would false-positive every network-
+        flaky run.
+      • Transient-only tracebacks (SMTP disconnect, connection reset,
+        TLS handshake timeout). These are already retried 4× by the
+        retry layer; when they ultimately fail it's a network blip the
+        next cron fire will work around. The check still flags any file
+        that mixes a transient with a genuine exception — we don't want
+        a TimeoutError to mask a RuntimeError sitting next to it.
     """
     log_dir = log_dir or Path("data/agent/launchd-logs")
     if not log_dir.exists():
@@ -333,6 +425,7 @@ def _check_recent_error_logs(
     # markers cover both cases.
     error_markers = ("Traceback", "ERROR")
     flagged: list[dict[str, Any]] = []
+    skipped_transient: list[str] = []
     for err_file in log_dir.glob("*.err"):
         stat = err_file.stat()
         mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
@@ -345,30 +438,47 @@ def _check_recent_error_logs(
         except OSError:
             text = ""
         has_real_error = any(marker in text for marker in error_markers)
-        if has_real_error:
-            # Capture a short excerpt of the first error line for the report.
-            first_err_line = next(
-                (ln for ln in text.splitlines()
-                 if any(m in ln for m in error_markers)),
-                "",
-            )
-            flagged.append({
-                "name": err_file.name,
-                "size_bytes": stat.st_size,
-                "modified": mtime.isoformat(),
-                "first_error_line": first_err_line[:200],
-            })
+        if not has_real_error:
+            continue
+        if _is_transient_only_traceback(text):
+            # SMTP / connection-reset / TLS-timeout — already 4×-retried,
+            # nothing to do beyond noting it. Don't fail the audit.
+            skipped_transient.append(err_file.name)
+            continue
+        # Capture a short excerpt of the first error line for the report.
+        first_err_line = next(
+            (ln for ln in text.splitlines()
+             if any(m in ln for m in error_markers)),
+            "",
+        )
+        flagged.append({
+            "name": err_file.name,
+            "size_bytes": stat.st_size,
+            "modified": mtime.isoformat(),
+            "first_error_line": first_err_line[:200],
+        })
     passed = not flagged
+    transient_note = (
+        f" ({len(skipped_transient)} transient-only flake(s) ignored: "
+        f"{skipped_transient})"
+        if skipped_transient else ""
+    )
     return AuditCheck(
         name="error_logs",
         passed=passed,
         message=(
             f"no real errors in launchd logs in last {hours}h "
-            "(WARNINGs from retry layer ignored)" if passed else
+            f"(WARNINGs from retry layer ignored){transient_note}"
+            if passed else
             f"{len(flagged)} launchd .err logs with REAL errors in last {hours}h: "
-            f"{[f['name'] for f in flagged]}"
+            f"{[f['name'] for f in flagged]}{transient_note}"
         ),
-        details={"flagged": flagged, "log_dir": str(log_dir), "hours": hours},
+        details={
+            "flagged": flagged,
+            "skipped_transient": skipped_transient,
+            "log_dir": str(log_dir),
+            "hours": hours,
+        },
     )
 
 

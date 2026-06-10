@@ -338,23 +338,31 @@ def test_selective_cancel_preserves_manual_orders() -> None:
     assert n == 1
 
 
-def test_selective_cancel_catches_oto_child_stops_via_position_match() -> None:
-    """OTO child stops get broker-generated client_order_ids that we
-    can't tag. The fallback heuristic is: if it's a stop order on a
-    symbol we currently hold, treat it as one of ours."""
+def test_cancel_catches_all_stops_regardless_of_held_status() -> None:
+    """T-bug 2026-06-09: cancel ALL stop orders, including stops on
+    NON-held symbols (orphan stops from a previously-closed position).
+
+    The legacy behaviour restricted cancellation to stops on currently-
+    held symbols, leaving orphans alive — the bracket's child stop
+    persisted after a position closed and fired on the next down day,
+    driving the position SHORT. The new policy is: cancel every stop
+    order on this single-operator paper account every morning. Operator
+    confirmed they don't place manual orders here; if that changes, the
+    held-symbols guard goes back in.
+    """
     from types import SimpleNamespace
 
     open_orders_db = [
         SimpleNamespace(
             id="oto-child-stop-1",
             client_order_id="broker-generated-xyz",   # no agent tag
-            symbol="AAPL",                            # but we hold AAPL
+            symbol="AAPL",                            # held
             order_type=SimpleNamespace(value="stop"),
         ),
         SimpleNamespace(
-            id="manual-stop-on-foreign-symbol",
-            client_order_id="manual-xyz",
-            symbol="TSLA",                            # we don't hold TSLA
+            id="orphan-stop-on-closed-name",
+            client_order_id="broker-generated-abc",
+            symbol="TSLA",                            # NOT held — orphan
             order_type=SimpleNamespace(value="stop"),
         ),
     ]
@@ -366,11 +374,12 @@ def test_selective_cancel_catches_oto_child_stops_via_position_match() -> None:
     exec_ = AlpacaExecutor(trading_client=client)
     n, err = exec_._cancel_agent_orders()
     assert err is None
-    # AAPL stop cancelled (we hold AAPL → it's our OTO child); TSLA
-    # stop preserved (we don't hold TSLA → it's the operator's).
+    # BOTH stops cancelled — the orphan on TSLA is exactly the case that
+    # caused the AMD bug. Leaving it alive would let it fire on the next
+    # down day and short the position.
     assert "oto-child-stop-1" in cancelled_ids
-    assert "manual-stop-on-foreign-symbol" not in cancelled_ids
-    assert n == 1
+    assert "orphan-stop-on-closed-name" in cancelled_ids
+    assert n == 2
 
 
 def test_kept_stop_failure_triggers_emergency_close() -> None:
@@ -998,3 +1007,149 @@ def test_forced_exit_when_trail_stop_above_signal() -> None:
     ]
     assert len(refused) == 1
     assert "stop" in refused[0].error.lower()
+
+
+# ---------------------------------------------------------------------------
+# T-bug 2026-06-09: short auto-cover guard + cancel-all-stops
+# ---------------------------------------------------------------------------
+
+
+def test_daily_rebalance_auto_covers_short_positions() -> None:
+    """Operator policy is long-only. If the broker shows ANY qty<0 going
+    into a run, the executor must immediately submit a buy-to-cover for
+    |qty| shares BEFORE the plan loop runs.
+
+    This is the regression guard for the 2026-06-09 AMD bug: AMD ended
+    at -9 short after an orphan stop fired against a 0 position. The
+    plan loop's "current<0, target>0" path routed through "new" OTO,
+    which only added a small long without touching the short.
+    """
+    # Broker: holds -9 AMD short. Today's signal says go long AAPL.
+    client = _FakeTradingClient(
+        equity=100_000,
+        positions={"AMD": -9},
+    )
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},
+        signal_prices={"AAPL": 200.0, "AMD": 500.0},
+        stop_loss_pct=0.05,
+        dry_run=False,
+    )
+    # The submitted orders should include a buy-to-cover for AMD.
+    cover = [
+        o for o in report.submitted_orders
+        if o.symbol == "AMD" and o.side == "buy" and o.status == "submitted"
+    ]
+    assert len(cover) >= 1, (
+        f"expected at least one AMD buy-to-cover; got: "
+        f"{[(o.symbol, o.side, o.qty, o.status) for o in report.submitted_orders]}"
+    )
+    # Buy-to-cover qty matches the absolute short qty.
+    assert cover[0].qty == 9
+    # Annotated as an auto-cover so the audit trail is unambiguous.
+    assert "AUTO-COVER" in (cover[0].error or "")
+
+
+def test_daily_rebalance_skips_auto_cover_on_dry_run() -> None:
+    """Dry runs must not submit orders, including the cover."""
+    client = _FakeTradingClient(
+        equity=100_000,
+        positions={"AMD": -9},
+    )
+    exec_ = AlpacaExecutor(trading_client=client)
+    exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},
+        signal_prices={"AAPL": 200.0, "AMD": 500.0},
+        stop_loss_pct=0.05,
+        dry_run=True,
+    )
+    # No actual broker calls in dry mode.
+    assert client.submitted == []
+
+
+def test_daily_rebalance_handles_short_in_target_universe_without_double_buying() -> None:
+    """If a short symbol ALSO has a positive target weight today, the
+    cover fires once and the plan loop should not re-buy on top of it
+    (since the short was promoted out of `positions` before the plan ran).
+
+    Verifies the cover marked the symbol as flat for the rest of the
+    flow — otherwise we'd issue cover-buy + new-OTO-buy = double size.
+    """
+    client = _FakeTradingClient(
+        equity=100_000,
+        positions={"AMD": -9},
+    )
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AMD": 0.05},   # target IS long AMD today
+        signal_prices={"AMD": 500.0},
+        stop_loss_pct=0.05,
+        dry_run=False,
+    )
+    # Buys: at minimum the cover. The plan loop may also issue a new
+    # OTO long if target_qty was nonzero — that's fine, operator chose
+    # to re-enter.
+    amd_buys = [
+        o for o in report.submitted_orders
+        if o.symbol == "AMD" and o.side == "buy" and o.status == "submitted"
+    ]
+    # CRITICAL: no ENTRY sells for AMD. A stop_loss-role sell IS expected
+    # (it's the protective bracket on any new OTO long), but an
+    # entry-role sell would be "we closed the position we just covered"
+    # — undoing the cover.
+    amd_entry_sells = [
+        o for o in report.submitted_orders
+        if o.symbol == "AMD" and o.side == "sell"
+        and o.status == "submitted" and o.role == "entry"
+    ]
+    assert amd_entry_sells == [], (
+        f"do NOT sell what we just covered (got entry sells: {amd_entry_sells})"
+    )
+    # First buy is the cover (qty=9).
+    assert amd_buys[0].qty == 9
+
+
+# ---------------------------------------------------------------------------
+# T-bug 2026-06-09: cancel ALL stops (including orphans on non-held names)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_agent_orders_cancels_stops_on_non_held_symbols() -> None:
+    """Orphan stops (stop order on a symbol with no current position)
+    must be cancelled. The original logic restricted cancels to stops on
+    currently-held symbols, leaving orphans to fire and drive positions
+    short — the AMD bug. Now we cancel every stop on the account."""
+
+    class _OT:
+        def __init__(self, v):
+            self.value = v
+
+    class _StopOrder:
+        def __init__(self, sid, sym, order_type, client_id=""):
+            self.id = sid
+            self.symbol = sym
+            self.client_order_id = client_id
+            self.order_type = _OT(order_type)
+
+    class _Client(_FakeTradingClient):
+        def __init__(self):
+            super().__init__(equity=100_000, positions={})  # NO held positions
+            self._orphan_stop = _StopOrder(
+                "stop-orphan-1", "AMD", "stop", client_id="alpaca-broker-id",
+            )
+            self.cancelled_ids: list[str] = []
+
+        def get_orders(self, *, filter=None):
+            return [self._orphan_stop]
+
+        def cancel_order_by_id(self, order_id):
+            self.cancelled_ids.append(str(order_id))
+
+    client = _Client()
+    exec_ = AlpacaExecutor(trading_client=client)
+    n_cancelled, err = exec_._cancel_agent_orders()
+    assert n_cancelled == 1, (
+        f"expected 1 cancelled (the orphan stop); got {n_cancelled}, err={err}"
+    )
+    assert "stop-orphan-1" in client.cancelled_ids
