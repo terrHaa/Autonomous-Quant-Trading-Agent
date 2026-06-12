@@ -168,3 +168,69 @@ def test_monthly_renders_benchmarks_via_weekly_renderer() -> None:
     assert "+7.00%" in body
     # Recommendations section still works.
     assert "test rec" in body
+
+
+# ---------------------------------------------------------------------------
+# compute_deployment_fidelity — June 2026 under-deployment diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _fidelity_run(date_s, ens_gross, sub_gross, entries):
+    """Minimal run record: entries = [(sym, status), ...]."""
+    return {
+        "date": date_s,
+        "target_weights": {f"T{i}": ens_gross / 3 for i in range(3)},
+        "execution_report": {
+            "target_weights": {f"T{i}": sub_gross / 3 for i in range(3)},
+            "submitted_orders": [
+                {"symbol": s, "role": "entry", "status": st, "side": "buy", "qty": 1}
+                for s, st in entries
+            ],
+        },
+    }
+
+
+def test_deployment_fidelity_empty_runs() -> None:
+    from quant.agent.reports import compute_deployment_fidelity
+    assert compute_deployment_fidelity([]) == {}
+
+
+def test_deployment_fidelity_gross_and_failers() -> None:
+    import pytest
+
+    from quant.agent.reports import compute_deployment_fidelity
+    runs = [
+        _fidelity_run("2026-06-08", 0.54, 0.24,
+                      [("CIEN", "failed"), ("AAPL", "submitted")]),
+        _fidelity_run("2026-06-09", 0.56, 0.25,
+                      [("CIEN", "failed"), ("AAPL", "kept"), ("MSFT", "submitted")]),
+        _fidelity_run("2026-06-10", 0.58, 0.26,
+                      [("CIEN", "failed"), ("NVDA", "failed")]),
+    ]
+    df = compute_deployment_fidelity(runs)
+    # Latest = last by date (06-10).
+    assert df["ensemble_gross_pct_latest"] == pytest.approx(58.0)
+    assert df["submitted_gross_pct_latest"] == pytest.approx(26.0)
+    assert df["ensemble_gross_pct_week_avg"] == pytest.approx(56.0)
+    assert df["submitted_gross_pct_week_avg"] == pytest.approx(25.0)
+    # 7 entry rows: 3 placed (submitted/kept), 4 failed.
+    assert df["entries_intended_week"] == 7
+    assert df["entries_failed_week"] == 4
+    assert df["entry_fidelity_pct"] == pytest.approx(42.9, abs=0.1)
+    # CIEN failed 3 days → repeat failer; NVDA only 1 day → excluded.
+    assert df["repeat_entry_failers"] == {"CIEN": 3}
+
+
+def test_weekly_report_renders_deployment_section() -> None:
+    from quant.agent.reports import render_weekly_report
+    runs = [
+        _fidelity_run("2026-06-10", 0.54, 0.24,
+                      [("CIEN", "failed"), ("CIEN2", "submitted")]),
+        _fidelity_run("2026-06-09", 0.54, 0.24, [("CIEN", "failed")]),
+    ]
+    _, body = render_weekly_report(
+        week_ending=date(2026, 6, 12), daily_runs=runs,
+    )
+    assert "Deployment & execution fidelity" in body
+    assert "Under-deployed" in body          # 24% avg < 50% triggers warning
+    assert "CIEN" in body                     # repeat failer named

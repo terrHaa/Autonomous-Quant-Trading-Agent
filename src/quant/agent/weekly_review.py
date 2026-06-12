@@ -90,6 +90,13 @@ def _compute_weekly_metrics(
     else:
         metrics["top3_concentration_pct"] = 0.0
         metrics["n_positions_latest_run"] = 0
+
+    # Deployment + execution fidelity — the numbers that would have
+    # surfaced the June 2026 under-deployment week immediately. Shared
+    # with the email render (reports.compute_deployment_fidelity) so the
+    # AI analyst and the operator read the same figures.
+    from quant.agent.reports import compute_deployment_fidelity  # noqa: PLC0415
+    metrics.update(compute_deployment_fidelity(daily_runs))
     return metrics
 
 

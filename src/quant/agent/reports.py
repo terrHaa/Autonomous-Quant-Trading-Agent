@@ -191,6 +191,128 @@ def render_daily_report(
     return subject, "\n".join(lines) + "\n"
 
 
+def compute_deployment_fidelity(daily_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deployment + execution-fidelity diagnostics from a week's run records.
+
+    These three numbers exist because of the June 2026 "flat performance"
+    incident, where the book silently ran ~25% deployed for a week and
+    nothing in the weekly email surfaced it:
+
+      • ensemble gross   — what the strategies asked for (pre vol-target;
+        sum of the record's top-level ``target_weights``). A value well
+        under 100% means weight is leaking before vol-targeting (e.g.
+        the dust-filter bug).
+      • submitted gross  — what was actually sent to the broker (post
+        vol-target; sum of ``execution_report.target_weights``). The
+        true deployment level.
+      • entry fidelity   — of the entry orders the executor planned,
+        how many were actually placed vs failed. Repeat failers (same
+        symbol failing 2+ days) get named: that pattern is how the
+        trail-anchor re-entry deadlock stayed invisible for a week.
+
+    Returns {} when ``daily_runs`` is empty. Pure function — safe in tests.
+    """
+    if not daily_runs:
+        return {}
+
+    ens_gross: list[float] = []
+    sub_gross: list[float] = []
+    n_entries_placed = 0
+    n_entries_failed = 0
+    fail_days: dict[str, int] = {}
+    for run in sorted(daily_runs, key=lambda r: r.get("date", "")):
+        tw = run.get("target_weights", {})
+        er = run.get("execution_report", {})
+        etw = er.get("target_weights", {})
+        if tw:
+            ens_gross.append(sum(tw.values()))
+        if etw:
+            sub_gross.append(sum(etw.values()))
+        failed_today: set[str] = set()
+        for o in er.get("submitted_orders", []):
+            if o.get("role") != "entry":
+                continue
+            if o.get("status") in ("submitted", "kept"):
+                n_entries_placed += 1
+            elif o.get("status") == "failed":
+                n_entries_failed += 1
+                failed_today.add(o.get("symbol", "?"))
+        for sym in failed_today:
+            fail_days[sym] = fail_days.get(sym, 0) + 1
+
+    n_intended = n_entries_placed + n_entries_failed
+    out: dict[str, Any] = {
+        "ensemble_gross_pct_latest": round(ens_gross[-1] * 100, 1) if ens_gross else None,
+        "ensemble_gross_pct_week_avg": (
+            round(sum(ens_gross) / len(ens_gross) * 100, 1) if ens_gross else None
+        ),
+        "submitted_gross_pct_latest": round(sub_gross[-1] * 100, 1) if sub_gross else None,
+        "submitted_gross_pct_week_avg": (
+            round(sum(sub_gross) / len(sub_gross) * 100, 1) if sub_gross else None
+        ),
+        "entries_intended_week": n_intended,
+        "entries_failed_week": n_entries_failed,
+        "entry_fidelity_pct": (
+            round(n_entries_placed / n_intended * 100, 1) if n_intended else None
+        ),
+        # Symbols whose entries failed on 2+ days, worst first, top 10.
+        "repeat_entry_failers": dict(
+            sorted(
+                ((s, n) for s, n in fail_days.items() if n >= 2),
+                key=lambda kv: -kv[1],
+            )[:10]
+        ),
+    }
+    return out
+
+
+def _deployment_fidelity_lines(daily_runs: list[dict[str, Any]]) -> list[str]:
+    """Markdown section for the weekly email. Empty list if no data."""
+    df = compute_deployment_fidelity(daily_runs)
+    if not df:
+        return []
+    lines: list[str] = []
+    lines.append("## Deployment & execution fidelity")
+    lines.append("")
+    lines.append("| Metric | Latest run | Week avg |")
+    lines.append("|---|---|---|")
+    lines.append(
+        f"| Ensemble gross (strategies asked) "
+        f"| {df['ensemble_gross_pct_latest']}% "
+        f"| {df['ensemble_gross_pct_week_avg']}% |"
+    )
+    lines.append(
+        f"| Submitted gross (sent to broker) "
+        f"| {df['submitted_gross_pct_latest']}% "
+        f"| {df['submitted_gross_pct_week_avg']}% |"
+    )
+    if df["entry_fidelity_pct"] is not None:
+        lines.append(
+            f"| Entry fidelity (placed / planned) "
+            f"| {df['entry_fidelity_pct']}% "
+            f"({df['entries_failed_week']} of {df['entries_intended_week']} failed) | |"
+        )
+    lines.append("")
+    sub = df.get("submitted_gross_pct_week_avg")
+    if sub is not None and sub < 50:
+        lines.append(
+            f"⚠️ **Under-deployed:** the book averaged {sub}% gross this week "
+            "— most of the account sat in cash. Check the dust filter, "
+            "vol-target scale, and entry failures below."
+        )
+        lines.append("")
+    failers = df.get("repeat_entry_failers", {})
+    if failers:
+        named = ", ".join(f"`{s}` ×{n}d" for s, n in failers.items())
+        lines.append(
+            f"⚠️ **Repeat entry failures (2+ days):** {named}. "
+            "The same name failing day after day usually means a stale "
+            "stop anchor or a sizing refusal — not market noise."
+        )
+        lines.append("")
+    return lines
+
+
 def render_weekly_report(
     *,
     week_ending: date,
@@ -293,6 +415,8 @@ def render_weekly_report(
     lines.append(f"| Stop-loss orders | {n_stops} |")
     lines.append(f"| Failed orders | {n_failed} |")
     lines.append("")
+
+    lines.extend(_deployment_fidelity_lines(daily_runs))
 
     # Per-day equity if available.
     if equity_curve:
