@@ -684,3 +684,82 @@ def test_format_ai_error_unknown_exception_still_includes_recovery_recipe() -> N
     msg = format_ai_error(RuntimeError("some weird bug"))
     assert "--ai-only" in msg
     assert "some weird bug" in msg
+
+
+# ---------------------------------------------------------------------------
+# _create_message — 403/connection retry (the 2026-06-06 weekly-review fix)
+# ---------------------------------------------------------------------------
+
+
+def _analyst_with_flaky_client(fail_times: int, exc: Exception) -> AIAnalyst:
+    """AIAnalyst whose client raises `exc` for the first `fail_times` calls."""
+    a = object.__new__(AIAnalyst)
+    a._model = "test-model"
+    calls = {"n": 0}
+
+    class _FlakyClient:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                calls["n"] += 1
+                if calls["n"] <= fail_times:
+                    raise exc
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text="recovered")],
+                )
+
+    a._client = _FlakyClient()
+    a._calls = calls  # type: ignore[attr-defined]
+    return a
+
+
+def test_create_message_retries_403_from_rotating_vpn_ip(monkeypatch) -> None:
+    """A 403 (blocklisted VPN exit IP) is retried, not fatal.
+
+    The 2026-06-06 weekly review died on a single 403; on this
+    deployment exit IPs rotate per connection so a retry usually
+    lands on a clean IP.
+    """
+    import anthropic
+
+    import quant.util.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod.time, "sleep", lambda _s: None)
+    import httpx
+    resp = httpx.Response(
+        status_code=403,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    exc = anthropic.PermissionDeniedError(
+        message="Error code: 403 - {'error': {'type': 'forbidden'}}",
+        response=resp,
+        body=None,
+    )
+    a = _analyst_with_flaky_client(fail_times=2, exc=exc)
+    msg = a._create_message(model="m", max_tokens=5, messages=[])
+    assert msg.content[0].text == "recovered"
+    assert a._calls["n"] == 3  # 2 failures + 1 success
+
+
+def test_create_message_does_not_retry_auth_error(monkeypatch) -> None:
+    """401 (bad API key) is permanent — must raise immediately, no retries."""
+    import anthropic
+    import pytest
+
+    import quant.util.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod.time, "sleep", lambda _s: None)
+    import httpx
+    resp = httpx.Response(
+        status_code=401,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    exc = anthropic.AuthenticationError(
+        message="Error code: 401 - invalid x-api-key",
+        response=resp,
+        body=None,
+    )
+    a = _analyst_with_flaky_client(fail_times=99, exc=exc)
+    with pytest.raises(anthropic.AuthenticationError):
+        a._create_message(model="m", max_tokens=5, messages=[])
+    assert a._calls["n"] == 1  # exactly one attempt

@@ -480,6 +480,36 @@ class AIAnalyst:
         self._client = anthropic.Anthropic(api_key=api_key)  # type: ignore[attr-defined]
         self._model = model
 
+    def _create_message(self, **kwargs: Any):
+        """``messages.create`` with retries tuned for the VPN deployment.
+
+        The SDK's built-in retries cover 429/5xx but NOT 403 — and on
+        this operator's network a 403 is almost never a real permission
+        problem: it means the VPN exit IP landed on Anthropic's proxy/
+        datacenter blocklist (see ``_describe_ai_failure``). Exit IPs
+        rotate per connection, so a fresh attempt after a pause usually
+        succeeds — the 2026-06-06 weekly review died on a single 403
+        that a retry would likely have cleared. Long backoffs are fine:
+        every caller is an unattended batch job.
+
+        Connection errors (tunnel re-establishing, GFW interference)
+        retry for the same reason. Genuine auth failures raise
+        ``AuthenticationError`` (401), which is NOT retried.
+        """
+        import anthropic  # noqa: PLC0415
+
+        from quant.util.retry import retry_on_transient  # noqa: PLC0415
+
+        return retry_on_transient(
+            lambda: self._client.messages.create(**kwargs),
+            transient=(
+                anthropic.PermissionDeniedError,   # 403 — blocklisted VPN exit IP
+                anthropic.APIConnectionError,      # tunnel drop / GFW reset
+            ),
+            description="Anthropic messages.create",
+            backoffs=(30.0, 60.0, 120.0),
+        )
+
     def analyze(
         self,
         *,
@@ -533,7 +563,7 @@ class AIAnalyst:
         # Rebuild the system prompt EACH call so MEMORY.md and STRATEGY_LIBRARY.md
         # updates from prior months are immediately visible.
         system_prompt = _build_system_prompt()
-        message = self._client.messages.create(
+        message = self._create_message(
             model=self._model,
             max_tokens=8192,
             system=system_prompt,
@@ -683,7 +713,7 @@ class AIAnalyst:
         )
 
         system_prompt = _build_weekly_system_prompt()
-        message = self._client.messages.create(
+        message = self._create_message(
             model=self._model,
             max_tokens=4096,
             system=system_prompt,
