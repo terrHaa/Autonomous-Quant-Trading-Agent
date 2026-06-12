@@ -42,9 +42,18 @@ dates:
 # ---------------------------------------------------------------------------
 risk:
   # Target annualized portfolio volatility, expressed as a decimal.
-  # 0.10 = 10% annual vol — roughly half the long-run vol of the S&P 500.
-  # The allocator scales gross exposure to hit this target.
-  vol_target_annual: 0.10
+  # 0.12 = 12% annual vol (~3/4 of the S&P 500's long run). The
+  # allocator scales gross exposure to hit this target.
+  #
+  # Derivation (operator decision 2026-06-12): expected worst drawdown
+  # of an equity book ≈ 1.3-1.5× its annual vol. 12% vol alone implies
+  # ~16-18% worst DD — slightly OVER the 15% kill line — so this value
+  # is only coherent COMBINED with the deployment policy in
+  # quant.risk.deployment (200d SPY regime filter + graduated drawdown
+  # ladder), which compresses the left tail. Do not raise this without
+  # also revisiting MAX_DRAWDOWN_KILL; do not remove the deployment
+  # policy while this is above 0.10.
+  vol_target_annual: 0.12
 
   # Hard cap on gross leverage (sum of |position| / equity). 1.0 = no leverage.
   max_gross_leverage: 1.5

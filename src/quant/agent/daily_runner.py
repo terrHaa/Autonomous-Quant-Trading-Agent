@@ -627,12 +627,17 @@ def run_daily_trade(
     # stop opening NEW entries. Existing positions + their GTC stops are
     # left untouched (we still want to protect what's held). The check
     # only fires for non-dry-run; tests + debug invocations bypass it.
+    # Tracked across the run: the drawdown ladder (step 3e) reuses the
+    # same peak-vs-equity number the kill switch computes. 0.0 (no
+    # drawdown → full size) when the check is skipped or fails.
+    current_drawdown = 0.0
     if not dry_run:
         try:
             current_equity = executor.get_equity()
             tripped, peak, dd = _kill_switch_tripped(
                 current_equity, runs_dir=runs_dir,
             )
+            current_drawdown = dd
             if tripped:
                 logger.error(
                     "DRAWDOWN KILL SWITCH TRIPPED — equity $%.2f is %.1f%% "
@@ -847,6 +852,41 @@ def run_daily_trade(
             config.risk.vol_target_annual * 100,
         )
 
+    # --- 3e. Deployment policy: regime filter × drawdown ladder --------
+    # Multiplier on the vol-targeted book (see quant.risk.deployment for
+    # the rationale). SPY is fetched separately — it's an ETF, never in
+    # the equity universe. Fail-open: no SPY data → scale 1.0 + warning.
+    from quant.risk.deployment import drawdown_scale, regime_scale
+    spy_closes = None
+    try:
+        spy_bars = cache.get_daily_bars(["SPY"], start, end)
+        if not spy_bars.empty:
+            spy_closes = spy_bars.loc["SPY"]["close"]
+    except Exception as e:
+        logger.warning(
+            "SPY fetch for regime filter failed (%s: %s) — filter "
+            "fails open at full size", type(e).__name__, e,
+        )
+    r_scale, regime_diag = regime_scale(spy_closes)
+    dd_scale = drawdown_scale(current_drawdown)
+    deploy_scale = r_scale * dd_scale
+    deployment_diag = {
+        **regime_diag,
+        "regime_scale": r_scale,
+        "drawdown_pct": round(current_drawdown * 100, 2),
+        "drawdown_scale": dd_scale,
+        "deploy_scale": deploy_scale,
+    }
+    if deploy_scale < 1.0:
+        scaled_weights = {s: w * deploy_scale for s, w in scaled_weights.items()}
+        logger.info(
+            "deployment policy: gross %.4f → %.4f (regime %s ×%.2f, "
+            "drawdown %.1f%% ×%.2f)",
+            post_gross, sum(scaled_weights.values()),
+            regime_diag.get("regime"), r_scale,
+            current_drawdown * 100, dd_scale,
+        )
+
     # --- 4. Submit via the executor's agent flow ---
     report = executor.submit_daily_rebalance(
         target_weights=scaled_weights,
@@ -875,6 +915,7 @@ def run_daily_trade(
     # can show what was active and how.
     path = save_daily_run(
         run_date=today,
+        deployment=deployment_diag,
         strategy_name=f"ensemble({len(strategies)})",
         strategy_params={
             "ensemble_state": {

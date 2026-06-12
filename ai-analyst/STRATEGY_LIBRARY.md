@@ -56,6 +56,28 @@ No single position may exceed 20% of equity. Hard floor; cannot be
 changed by the analyst. Quoted so you know to size proposals so they
 don't hit the cap in normal conditions.
 
+### Deployment policy — regime filter × drawdown ladder (operator hard policy, 2026-06-12)
+
+After vol-targeting (12% annual target, `configs/default.yaml`), gross
+exposure is multiplied by two factors from `quant.risk.deployment`:
+
+1. **SPY 200-day regime filter**: ×1.0 when SPY closes at/above its
+   200d SMA, ×0.5 below. Validated on our own feed (2016–2026 SPY):
+   Sharpe 0.90 → 1.03, max drawdown -33.8% → -25.6%, at a cost of
+   1.6pts CAGR.
+2. **Graduated drawdown ladder**: ×0.75 at -5% portfolio drawdown,
+   ×0.50 at -10%, ×0.25 at -12.5%. Monte Carlo (12%-vol book): cuts
+   P(touching the -15% kill line within a year) from ~19% to ~2% at
+   Sharpe 0.5. This ladder is what makes the 12% vol target coherent
+   with the -15% kill switch.
+
+**Not tunable by the analyst.** A regime filter that gets re-tuned is a
+regime filter that's been overfit; the ladder is risk policy, not a
+return knob. The daily run record's `deployment` field logs each day's
+decision — read it when diagnosing why gross deviated from target. If
+you believe the policy itself is wrong, say so in `analysis` with
+evidence; do not route changes through `proposed_state_changes`.
+
 ---
 
 ## Active Strategies (loaded by ensemble.build_strategies)

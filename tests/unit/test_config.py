@@ -40,7 +40,7 @@ def test_default_config_loads() -> None:
     # the YAML or the schema started returning the wrong shape.
     assert cfg.universe.name == "sp500_liquid"
     assert cfg.dates.start == date(2015, 1, 1)
-    assert cfg.risk.vol_target_annual == 0.10
+    assert cfg.risk.vol_target_annual == 0.12
     assert cfg.backtest.rebalance == "daily"
     assert cfg.evaluation.trading_days_per_year == 252
     assert cfg.execution.alpaca_env == "paper"

@@ -84,6 +84,7 @@ def save_daily_run(
     signal_prices: dict[str, float],
     execution_report: ExecutionReport,
     runs_dir: Path | None = None,
+    deployment: dict[str, Any] | None = None,
 ) -> Path:
     """Serialize one day's run to JSON. Returns the file path."""
     out_dir = runs_dir or DEFAULT_RUNS_DIR
@@ -99,6 +100,10 @@ def save_daily_run(
         "signal_prices": dict(signal_prices),
         "execution_report": _serialize_report(execution_report),
     }
+    if deployment is not None:
+        # Regime filter + drawdown ladder decision (quant.risk.deployment)
+        # so reports and the audit can reconstruct WHY gross was scaled.
+        payload["deployment"] = deployment
     # default=str lets datetime, date, and other non-JSON-native types
     # serialize cleanly without us hand-writing a converter for each.
     _atomic_write_text(out_path, json.dumps(payload, default=str, indent=2))

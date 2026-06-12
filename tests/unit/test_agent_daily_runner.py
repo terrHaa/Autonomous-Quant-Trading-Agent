@@ -770,3 +770,81 @@ def test_run_daily_report_raises_when_no_log_exists(tmp_path: Path) -> None:
             runs_dir=tmp_path,
             email_sender=sender,  # type: ignore[arg-type]
         )
+
+
+# ---------------------------------------------------------------------------
+# Deployment policy (regime filter × drawdown ladder) in the live pipeline
+# ---------------------------------------------------------------------------
+
+
+class _RegimeCache(_FakeCache):
+    """FakeCache that serves a separate SPY frame for the regime fetch."""
+
+    def __init__(self, bars: pd.DataFrame, spy_bars: pd.DataFrame) -> None:
+        super().__init__(bars)
+        self._spy_bars = spy_bars
+
+    def get_daily_bars(self, symbols, start, end):
+        if tuple(symbols) == ("SPY",):
+            return self._spy_bars
+        return super().get_daily_bars(symbols, start, end)
+
+
+def _run_with_spy(tmp_path: Path, spy_trend: float) -> tuple[dict, dict]:
+    """Run the pipeline with SPY trending up/down; return (weights, payload)."""
+    universe = [f"SYM{i}" for i in range(20)]
+    bars = _make_bars(universe, n_days=100)
+    spy = _make_bars(["SPY"], n_days=250, trend=spy_trend)
+    cache = _RegimeCache(bars, spy)
+    executor = _FakeExecutor()
+    path = daily_runner.run_daily_trade(
+        today=date(2024, 6, 1),
+        universe=universe,
+        cache=cache,
+        executor=executor,
+        runs_dir=tmp_path,
+        dry_run=True,
+    )
+    return executor.last_call["target_weights"], json.loads(path.read_text())
+
+
+def test_regime_filter_halves_gross_when_spy_below_sma(
+    tmp_path: Path, _in_trade_window
+) -> None:
+    on_dir, off_dir = tmp_path / "on", tmp_path / "off"
+    on_dir.mkdir()
+    off_dir.mkdir()
+    w_on, p_on = _run_with_spy(on_dir, spy_trend=0.5)     # SPY above SMA200
+    w_off, p_off = _run_with_spy(off_dir, spy_trend=-0.3)  # SPY below SMA200
+
+    assert p_on["deployment"]["regime"] == "risk_on"
+    assert p_on["deployment"]["deploy_scale"] == 1.0
+    assert p_off["deployment"]["regime"] == "risk_off"
+    assert p_off["deployment"]["deploy_scale"] == 0.5
+
+    gross_on = sum(w_on.values())
+    gross_off = sum(w_off.values())
+    assert gross_on > 0
+    assert gross_off == pytest.approx(gross_on * 0.5, rel=1e-6)
+
+
+def test_regime_filter_fails_open_without_spy_data(
+    tmp_path: Path, _in_trade_window
+) -> None:
+    """No SPY in the cache → full deployment + 'unknown' recorded, never
+    a halved book on a data outage."""
+    universe = [f"SYM{i}" for i in range(20)]
+    bars = _make_bars(universe, n_days=100)
+    cache = _FakeCache(bars)   # returns universe frame even for ["SPY"]
+    executor = _FakeExecutor()
+    path = daily_runner.run_daily_trade(
+        today=date(2024, 6, 1),
+        universe=universe,
+        cache=cache,
+        executor=executor,
+        runs_dir=tmp_path,
+        dry_run=True,
+    )
+    payload = json.loads(path.read_text())
+    assert payload["deployment"]["regime"] == "unknown"
+    assert payload["deployment"]["deploy_scale"] == 1.0
