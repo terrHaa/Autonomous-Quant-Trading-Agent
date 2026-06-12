@@ -687,15 +687,19 @@ class AlpacaExecutor:
                 continue
 
             # Effective stop distance for this symbol:
-            #   1. trail_pct if there's a trail_high (winning position
-            #      being maintained)
+            #   1. trail_pct if there's a trail_high AND we hold the
+            #      position (winning position being maintained). A trail
+            #      anchor on a FLAT name is stale state from a position
+            #      the broker already stopped out — anchoring a fresh
+            #      entry to it would put the stop above the signal price
+            #      and block re-entry indefinitely.
             #   2. else stop_pcts[sym] if the caller supplied a per-symbol
             #      override (ATR-normalized stops — wider on high-vol
             #      names, tighter on low-vol). Always ≤ stop_loss_pct
             #      since that's the operator's hard cap; the caller is
             #      responsible for enforcing it.
             #   3. else stop_loss_pct (the operator's flat-rate fallback).
-            if trail_highs is not None and sym in trail_highs:
+            if trail_highs is not None and sym in trail_highs and current_qty > 0:
                 stop_anchor = trail_highs[sym]
                 stop_dist = trail_pct if trail_pct is not None else stop_loss_pct
             else:

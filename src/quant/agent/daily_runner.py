@@ -805,6 +805,10 @@ def run_daily_trade(
         prev_trail=dict(state.trail_high),
         new_targets=set(target_weights.keys()),
         signal_prices=trail_anchors,
+        # Only long positions ratchet; a name we don't hold (stopped out
+        # at the broker since the last run) reseeds at today's price so
+        # its stale peak can't block re-entry day after day.
+        held_symbols={sym for sym, qty in held.items() if qty > 0},
     )
 
     # --- 3c. ATR-normalized per-symbol stop distances (T1.5) ----------

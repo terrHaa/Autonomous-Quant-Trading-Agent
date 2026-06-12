@@ -592,20 +592,20 @@ def test_daily_rebalance_closes_stale_positions_not_in_targets() -> None:
 
 
 def test_daily_rebalance_uses_trail_highs_for_stop_anchor() -> None:
-    """When a trail_high is provided, the stop anchors to it, not the signal price.
+    """When a HELD position has a trail_high, the stop anchors to it.
 
-    AAPL signal price today is $200 (yesterday's close). Trail high from
-    a prior up-leg is $250. With a 5% stop, the trailing stop sits at
-    $250 * 0.95 = $237.50 — protecting most of the gain from the move
-    up from $200 to $250.
+    AAPL is held (50 shares); signal price today is $200 (yesterday's
+    close). Trail high from a prior up-leg is $250. With a 5% stop, the
+    trailing stop sits at $250 * 0.95 = $237.50 — protecting most of
+    the gain from the move up from $200 to $250.
 
     Note: $237.50 > signal $200, so the rebalance's stop_price>=signal
-    guard fires and the entry is refused — the position would be
-    immediately stopped out if we re-entered. That's the correct
+    guard fires and the position is closed without re-entry — it would
+    be immediately stopped out if re-opened. That's the correct
     trailing-stop behavior: if the stock has retraced enough that the
     trailing stop would fire, exit and stay flat.
     """
-    client = _FakeTradingClient(equity=100_000)
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
     exec_ = AlpacaExecutor(trading_client=client)
     report = exec_.submit_daily_rebalance(
         target_weights={"AAPL": 0.10},
@@ -619,11 +619,42 @@ def test_daily_rebalance_uses_trail_highs_for_stop_anchor() -> None:
     # New refusal message phrasing: mentions "trail-anchored stop ... >= signal"
     assert "trail-anchored stop" in failed[0].error
     assert ">= signal" in failed[0].error
+    # And the held position got closed out.
+    sells = [o for o in report.submitted_orders
+             if o.symbol == "AAPL" and o.side == "sell" and o.role == "entry"]
+    assert len(sells) == 1
+
+
+def test_daily_rebalance_trail_high_ignored_when_flat() -> None:
+    """A stale trail_high on a FLAT name must not block the fresh entry.
+
+    Live incident, June 2026: names stopped out at the broker stayed in
+    targets; their stale trail highs anchored every fresh entry's stop
+    above the signal price, so the executor refused re-entry for days
+    (CIEN blocked 6 days running). When we hold nothing, the trail
+    anchor is meaningless — the entry must proceed with the stop
+    anchored at the signal price.
+    """
+    client = _FakeTradingClient(equity=100_000)   # flat — no positions
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.10},
+        signal_prices={"AAPL": 200.0},
+        stop_loss_pct=0.05,
+        trail_highs={"AAPL": 250.0},   # stale peak from a stopped-out position
+        dry_run=True,
+    )
+    failed = [o for o in report.submitted_orders if o.status == "failed"]
+    assert failed == []
+    stop_row = next(o for o in report.submitted_orders if o.role == "stop_loss")
+    # Anchored at signal $200, NOT the stale $250 high: 200 * 0.95 = 190.
+    assert stop_row.stop_price == 190.0
 
 
 def test_daily_rebalance_trail_high_below_signal_uses_it() -> None:
-    """When trail_high*0.95 < signal_price, the entry proceeds with trailing stop."""
-    client = _FakeTradingClient(equity=100_000)
+    """When trail_high*0.95 < signal_price, the held position keeps its trailing stop."""
+    # AAPL held at target qty: 0.10 * 100k / 200 = 50 shares → "kept".
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 50})
     exec_ = AlpacaExecutor(trading_client=client)
     # AAPL signal = $200, trail_high = $210 → trailing stop = $210*0.95 = $199.50
     # $199.50 < $200 (signal), so the entry passes the >=guard.
@@ -641,7 +672,8 @@ def test_daily_rebalance_trail_high_below_signal_uses_it() -> None:
 
 def test_daily_rebalance_tighter_trail_pct_locks_in_more_gain() -> None:
     """trail_pct < stop_loss_pct → trailing stop sits closer to the running high."""
-    client = _FakeTradingClient(equity=100_000)
+    # AAPL held at target qty: 0.10 * 100k / 245 = 40 shares → "kept".
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 40})
     exec_ = AlpacaExecutor(trading_client=client)
     # Trail high = $250, trail_pct = 0.03 → stop = $250 * 0.97 = $242.50.
     # Signal price = $245 (slight retrace) → stop $242.50 < $245, entry OK.
@@ -723,7 +755,9 @@ def test_daily_rebalance_signal_anchored_stop_when_no_trail_high() -> None:
 
 def test_daily_rebalance_trail_highs_only_applies_when_sym_present() -> None:
     """Names in target_weights but NOT in trail_highs fall back to signal-anchored."""
-    client = _FakeTradingClient(equity=100_000)
+    # AAPL held at target qty (0.05 * 100k / 200 = 25) so its trail
+    # anchor applies; MSFT is a fresh entry with no trail_high.
+    client = _FakeTradingClient(equity=100_000, positions={"AAPL": 25})
     exec_ = AlpacaExecutor(trading_client=client)
     # AAPL has trail_high; MSFT doesn't (e.g., MSFT is a fresh entry).
     report = exec_.submit_daily_rebalance(

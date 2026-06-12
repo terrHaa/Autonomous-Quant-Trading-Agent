@@ -165,15 +165,23 @@ def update_trail_highs(
     prev_trail: dict[str, float],
     new_targets: set[str],
     signal_prices: dict[str, float],
+    held_symbols: set[str],
 ) -> dict[str, float]:
     """Recompute the trail_high map for today's rebalance.
 
+    The trail ratchet is a property of a HELD position — it tracks the
+    peak since the position was opened. ``held_symbols`` (current broker
+    positions) decides ratchet vs. reseed:
+
     Rules:
-      • A name in ``new_targets`` that was already tracked → bump to
+      • A name in ``new_targets`` that we currently HOLD → bump to
         ``max(prev_trail[sym], today_signal_price)``. This is the ratchet.
-      • A name in ``new_targets`` that is NEW → seed with today's signal
-        price (first-day high = entry price; stop = entry × (1 - pct),
-        identical to the pre-trailing behavior).
+      • A name in ``new_targets`` that we do NOT hold → seed with today's
+        signal price, discarding any prior tracked high. The prior
+        position is gone (stopped out at the broker, or never opened);
+        keeping its peak would anchor the fresh entry's stop above the
+        current price and block re-entry every day until the price
+        climbed back above the stale high.
       • A name NOT in ``new_targets`` is dropped entirely — the position
         is being flatted today, so we forget the trail. If it re-enters
         later, the trail starts fresh.
@@ -187,8 +195,10 @@ def update_trail_highs(
         today = signal_prices.get(sym, 0.0)
         if today <= 0:
             continue
-        prev = prev_trail.get(sym, 0.0)
-        new_trail[sym] = max(prev, today)
+        if sym in held_symbols:
+            new_trail[sym] = max(prev_trail.get(sym, 0.0), today)
+        else:
+            new_trail[sym] = today
     return new_trail
 
 

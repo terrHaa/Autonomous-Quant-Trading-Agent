@@ -332,6 +332,7 @@ def test_trail_high_new_entry_seeded_to_signal_price() -> None:
         prev_trail={},
         new_targets={"AAPL", "MSFT"},
         signal_prices={"AAPL": 200.0, "MSFT": 400.0},
+        held_symbols=set(),
     )
     assert out == {"AAPL": 200.0, "MSFT": 400.0}
 
@@ -342,6 +343,7 @@ def test_trail_high_ratchets_up_on_higher_price() -> None:
         prev_trail={"AAPL": 200.0},
         new_targets={"AAPL"},
         signal_prices={"AAPL": 220.0},   # up day
+        held_symbols={"AAPL"},
     )
     assert out == {"AAPL": 220.0}
 
@@ -352,6 +354,7 @@ def test_trail_high_stays_on_flat_or_down_day() -> None:
         prev_trail={"AAPL": 250.0},      # prior peak
         new_targets={"AAPL"},
         signal_prices={"AAPL": 230.0},   # retraced
+        held_symbols={"AAPL"},
     )
     assert out == {"AAPL": 250.0}        # ratchet locks the high
 
@@ -362,6 +365,7 @@ def test_trail_high_drops_names_being_flatted() -> None:
         prev_trail={"AAPL": 250.0, "MSFT": 400.0},
         new_targets={"MSFT"},            # AAPL not in targets → flatten
         signal_prices={"MSFT": 410.0},
+        held_symbols={"AAPL", "MSFT"},
     )
     assert "AAPL" not in out
     assert out == {"MSFT": 410.0}
@@ -373,8 +377,28 @@ def test_trail_high_skips_missing_or_nonpositive_prices() -> None:
         prev_trail={"AAPL": 100.0},
         new_targets={"AAPL", "BROKEN"},
         signal_prices={"AAPL": 110.0},   # BROKEN missing
+        held_symbols={"AAPL"},
     )
     assert out == {"AAPL": 110.0}
+
+
+def test_trail_high_reseeds_after_stop_out() -> None:
+    """A target we no longer hold forgets its stale peak (re-entry deadlock fix).
+
+    Live incident, June 2026: CIEN/COHR/INTC et al. stopped out at the
+    broker but stayed in the ensemble's targets. Their trail highs kept
+    ratcheting off the old peak, so every fresh entry's stop computed
+    above the signal price and the executor refused re-entry 4-6 days
+    running. A name in targets but NOT held must reseed at today's
+    price, exactly like a first-time entry.
+    """
+    out = update_trail_highs(
+        prev_trail={"COHR": 389.63},     # stale peak from stopped-out position
+        new_targets={"COHR"},
+        signal_prices={"COHR": 355.22},  # today, well below the old peak
+        held_symbols=set(),              # broker says flat
+    )
+    assert out == {"COHR": 355.22}       # reseeded, NOT max(389.63, 355.22)
 
 
 def test_trail_high_round_trip_through_state(tmp_path: Path) -> None:
