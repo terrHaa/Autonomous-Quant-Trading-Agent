@@ -363,7 +363,31 @@ def compute_ensemble_targets(
 
     # Drop dust positions to keep the order book clean. Anything under
     # 0.5% of equity is below the stop-loss noise floor anyway.
-    return {s: w for s, w in combined.items() if abs(w) >= 0.005}
+    kept = {s: w for s, w in combined.items() if abs(w) >= 0.005}
+
+    # Redistribute the dropped dust proportionally across survivors so
+    # the ensemble's gross exposure is preserved. Without this, a wide
+    # universe silently de-levers the book: live incident June 2026 —
+    # the 519-name S&P universe spread SMA's conviction weights so thin
+    # that ~47% of gross fell under the 0.5% floor and leaked to cash,
+    # leaving the portfolio half-deployed before vol-targeting even ran.
+    # The rescale is capped at 2× as a sanity bound: if more than half
+    # the book is dust, the signal is too diffuse to concentrate
+    # mechanically — keep the partial deployment and let the operator
+    # see it in the weekly deployment diagnostics.
+    pre_gross = sum(abs(w) for w in combined.values())
+    post_gross = sum(abs(w) for w in kept.values())
+    if kept and post_gross > 0 and pre_gross > post_gross:
+        scale = min(pre_gross / post_gross, 2.0)
+        if scale > 1.0:
+            logger.info(
+                "dust redistribution: %d of %d names kept; gross %.4f → "
+                "%.4f (scale %.3f, dropped dust %.4f)",
+                len(kept), len(combined), post_gross,
+                post_gross * scale, scale, pre_gross - post_gross,
+            )
+            kept = {s: w * scale for s, w in kept.items()}
+    return kept
 
 
 # ---------------------------------------------------------------------------

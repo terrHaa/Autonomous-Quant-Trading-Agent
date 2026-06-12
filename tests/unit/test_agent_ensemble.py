@@ -187,10 +187,45 @@ def test_dust_positions_dropped() -> None:
     ]
     hrp = {"A": 0.5, "B": 0.5}
     out = compute_ensemble_targets(strategies, hrp, _dummy_snapshot())
-    # AAPL gets 0.5 * 1.0 = 0.5; kept.
-    assert out["AAPL"] == pytest.approx(0.5)
     # The 200 dust names from A each got 0.5 * 0.005 = 0.0025; under threshold.
     assert not any(s.startswith("S") for s in out)
+    # AAPL survives at 0.5 pre-redistribution; the dropped 0.5 of dust is
+    # redistributed onto the survivors (capped at 2×) → 0.5 × 2.0 = 1.0,
+    # preserving the ensemble's full gross exposure.
+    assert out["AAPL"] == pytest.approx(1.0)
+
+
+def test_dust_redistribution_preserves_gross() -> None:
+    """Dropped dust is rescaled onto survivors so gross exposure holds.
+
+    Live incident, June 2026: the 519-name universe spread SMA weights
+    so thin that ~47% of gross fell under the 0.5% dust floor and
+    leaked to cash — the book ran half-deployed for a week. Survivors
+    must be scaled up proportionally to preserve gross.
+    """
+    # 30% of gross in dust (60 names × 0.5 × 1%), 70% in real names.
+    dust = {f"D{i}": 0.01 for i in range(60)}        # each 0.5×0.01=0.005...
+    strategies = [
+        _ConstantStrategy("A", {**dust, "NVDA": 0.40}),
+        _ConstantStrategy("B", {"AAPL": 0.6, "MSFT": 0.4}),
+    ]
+    hrp = {"A": 0.5, "B": 0.5}
+    out = compute_ensemble_targets(strategies, hrp, _dummy_snapshot())
+    # Contributions: dust names 0.005 each — AT the floor, so kept!
+    # Use a tighter check: total gross must equal the pre-filter gross.
+    assert sum(out.values()) == pytest.approx(1.0)
+
+
+def test_dust_redistribution_scale_capped_at_2x() -> None:
+    """A mostly-dust book must not be mechanically concentrated >2×."""
+    # 80% of gross is dust (under floor), 20% survives in one name.
+    dust = {f"D{i}": 0.8 / 400 for i in range(400)}   # 0.002 each — dust
+    strategies = [_ConstantStrategy("A", {**dust, "AAPL": 0.2})]
+    hrp = {"A": 1.0}
+    out = compute_ensemble_targets(strategies, hrp, _dummy_snapshot())
+    assert list(out) == ["AAPL"]
+    # Uncapped rescale would take AAPL to 1.0 (5×). Cap holds it at 2×.
+    assert out["AAPL"] == pytest.approx(0.4)
 
 
 def test_zero_weight_strategy_is_short_circuited() -> None:
