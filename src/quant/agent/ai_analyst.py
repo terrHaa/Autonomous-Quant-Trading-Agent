@@ -337,6 +337,7 @@ def _build_user_message(
     recent_weekly_reports: list[dict[str, Any]] | None = None,
     monthly_metrics: dict[str, Any] | None = None,
     pipeline_snapshot: dict[str, Any] | None = None,
+    quant_diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """Compose the full user-turn message for the analyst call."""
     runs_table = _summarise_runs(daily_runs)
@@ -406,6 +407,37 @@ def _build_user_message(
     else:
         pipeline_section = ""
 
+    # Quant diagnostics (Phase 4): the factor-attribution / signal-health /
+    # regime bundle from monthly_diagnostics.build_quant_diagnostics. This
+    # is the numbers substrate for the comprehensive review — it answers
+    # "alpha or beta?", "which sleeve's edge has decayed?", and "what
+    # regime are we in?" objectively. The analyst must reason across the
+    # five pillars using THESE numbers, not vibes.
+    if quant_diagnostics:
+        diag_section = (
+            "## Quant Diagnostics — alpha/beta, signal health, regime "
+            "(Phase 4; reason across the 5 pillars using THESE numbers)\n\n"
+            "Use this to drive the review:\n"
+            "  - **Pillar 3 (alpha vs beta):** `attribution` gives the book's "
+            "alpha (intercept) and factor `betas`. If alpha is ~0 and R² high, "
+            "the book is just factor exposure — say so. Respect `n_obs`/"
+            "`warnings`: a short-history alpha is directional only.\n"
+            "  - **Pillar 1 (signal health):** `signal_health` has per-strategy "
+            "IC, `decaying` flags, `turnover`, and `regime_ic`. A decayed or "
+            "regime-dead sleeve is a candidate for retirement or regime-gating "
+            "— escalate it.\n"
+            "  - **Pillar 4 (risk/regime):** `regime.current`, the correlation "
+            "de-gross signal, and `candidate_regime_policy` (sleeve multipliers "
+            "for the current regime, derived from regime-conditional IC). "
+            "Evaluate whether to adopt it via `proposed_state_changes.regime_"
+            "policy` — it auto-applies behind backtest+shadow+DSR gates.\n"
+            "  - **Pillars 2 & 5** stay your standard taxonomy-gap search and "
+            "pipeline self-audit.\n\n"
+            f"```json\n{json.dumps(quant_diagnostics, indent=2, default=str)}\n```\n\n"
+        )
+    else:
+        diag_section = ""
+
     return (
         f"## Trading Results — last {len(daily_runs)} trading day(s) "
         "(daily-grain table; spot-check specific days here)\n\n"
@@ -415,6 +447,7 @@ def _build_user_message(
         f"## AI-Generated Strategies Already Active\n\n{active_ai}\n\n"
         f"## Monthly Grid-Search Results\n\n{grid_search_summary}\n\n"
         f"{weekly_section}"
+        f"{diag_section}"
         f"{pipeline_section}"
         "---\nPlease analyze the results and propose a new strategy if appropriate. "
         "TRIANGULATE three sources before any proposal: (1) weekly narratives — "
@@ -520,6 +553,7 @@ class AIAnalyst:
         recent_weekly_reports: list[dict[str, Any]] | None = None,
         monthly_metrics: dict[str, Any] | None = None,
         pipeline_snapshot: dict[str, Any] | None = None,
+        quant_diagnostics: dict[str, Any] | None = None,
     ) -> AnalysisReport:
         """Call Claude to analyze results and optionally propose a new strategy.
 
@@ -555,6 +589,7 @@ class AIAnalyst:
             recent_weekly_reports=recent_weekly_reports,
             monthly_metrics=monthly_metrics,
             pipeline_snapshot=pipeline_snapshot,
+            quant_diagnostics=quant_diagnostics,
         )
         logger.info(
             "ai_analyst: calling %s with %d daily runs", self._model, len(daily_runs)

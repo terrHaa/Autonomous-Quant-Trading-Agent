@@ -159,6 +159,15 @@ class EnsembleState:
     # to a static stop until the AI proposes a tighter value.
     trail_pct: float = 0.05
 
+    # Regime-conditional allocation policy (Phase 3/4). Maps
+    #   {strategy_name: {regime_label: multiplier}}
+    # applied to hrp_weights at trade time via risk.regime.apply_regime_policy
+    # AFTER the daily run classifies the current market regime. EMPTY by
+    # default → no regime scaling (live behavior unchanged until the
+    # monthly review populates it behind its backtest+shadow+DSR gates).
+    # This is research output the monthly writes, not a hand-tuned knob.
+    regime_policy: dict[str, dict[str, float]] = field(default_factory=dict)
+
 
 def update_trail_highs(
     *,

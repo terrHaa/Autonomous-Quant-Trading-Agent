@@ -526,6 +526,35 @@ def run_monthly_review(
         # below institutional norms. See ai_analyst._build_user_message
         # and ANALYST.md §6 step 5c.
         pipeline_snapshot = _build_pipeline_snapshot(config)
+
+        # Quant diagnostics bundle (Phase 4): factor attribution (alpha vs
+        # beta), per-strategy signal health (IC/decay/regime), and the
+        # current regime + candidate regime policy. Rendered in the email
+        # and fed to the analyst so the monthly is grounded in numbers, not
+        # narrative. Guarded — a diagnostics failure must not block review.
+        quant_diagnostics: dict | None = None
+        try:
+            from quant.agent.monthly_diagnostics import (
+                build_quant_diagnostics,
+                render_diagnostics_md,
+            )
+            dcache = cache or BarsCache(
+                client=AlpacaDataClient(), root=Path("data/bars/daily"),
+            )
+            quant_diagnostics = build_quant_diagnostics(
+                equity_curve=equity_curve,
+                state=current_state,
+                universe=universe,
+                cache=dcache,
+                as_of=for_date,
+            )
+            recommendations.append(render_diagnostics_md(quant_diagnostics))
+        except Exception as e:
+            logger.warning(
+                "monthly quant diagnostics failed (%s: %s) — continuing",
+                type(e).__name__, e,
+            )
+
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
@@ -535,6 +564,7 @@ def run_monthly_review(
             recent_weekly_reports=recent_weeklies,
             monthly_metrics=monthly_metrics,
             pipeline_snapshot=pipeline_snapshot,
+            quant_diagnostics=quant_diagnostics,
         )
         # Always include the qualitative analysis in the email.
         recommendations.append(f"## AI Analysis\n\n{ai_report.analysis}")

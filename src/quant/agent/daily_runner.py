@@ -849,9 +849,40 @@ def run_daily_trade(
     as_of = ts.max().date()
     snapshot = Snapshot.from_full_bars(bars, as_of=as_of)
     strategies = build_strategies(state, universe)
+
+    # --- 2a2. Regime-conditional sleeve allocation (Phase 3/4) ---
+    # If the monthly review has populated a regime_policy, classify today's
+    # market regime and scale the HRP sleeve weights by it — so a sleeve
+    # that's dead in the current regime (e.g. mean-reversion in an
+    # up-trend, IC≈0) is dialed down instead of allocated to. EMPTY policy
+    # (the default) → no-op, identical to the prior behavior. Failures here
+    # fall back to the unmodified HRP weights — never block the trade.
+    effective_hrp = state.hrp_weights
+    if state.regime_policy:
+        try:
+            from quant.risk.regime import apply_regime_policy, classify_regime
+            mkt_close = bars["close"].unstack(level=0).mean(axis=1)
+            mkt_close.index = [
+                t.date() if hasattr(t, "date") else t for t in mkt_close.index
+            ]
+            regime = classify_regime(mkt_close)
+            effective_hrp = apply_regime_policy(
+                state.hrp_weights, regime, state.regime_policy,
+            )
+            logger.info(
+                "regime allocation: regime=%s; hrp %s → %s",
+                regime, state.hrp_weights, effective_hrp,
+            )
+        except Exception as e:
+            logger.warning(
+                "regime allocation failed (%s: %s) — using base HRP weights",
+                type(e).__name__, e,
+            )
+            effective_hrp = state.hrp_weights
+
     shadow_targets: dict[str, dict[str, float]] = {}
     target_weights = compute_ensemble_targets(
-        strategies, state.hrp_weights, snapshot,
+        strategies, effective_hrp, snapshot,
         shadow_strategies=shadow_today,
         record_shadow_targets=shadow_targets,
     )
