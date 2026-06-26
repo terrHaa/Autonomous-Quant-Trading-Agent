@@ -22,6 +22,7 @@ Console-script: ``quant-monthly-review`` (registered in pyproject.toml).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import sys
@@ -675,6 +676,46 @@ def run_monthly_review(
                     + f"\n\n**Reasoning** (verbatim from analyst):\n\n"
                     f"> {sc.reasoning}\n"
                 )
+
+            # --- Regime policy: AUTO-APPLY behind the backtest+DSR gate ---
+            # Unlike the propose-only knobs above, a regime policy that
+            # clears regime_gate is persisted to EnsembleState immediately
+            # (operator's chosen "auto-apply behind gates" policy). Gated on
+            # auto_apply + bars being available to backtest against.
+            if sc.regime_policy and not ai_only:
+                if bars is None or bars.empty:
+                    recommendations.append(
+                        "## 🧭 Regime policy proposed — NOT applied "
+                        "(bars unavailable to backtest)."
+                    )
+                else:
+                    from quant.agent.ensemble import build_strategies
+                    from quant.agent.regime_gate import gate_regime_policy
+                    strategies = build_strategies(current_state, universe)
+                    gate = gate_regime_policy(
+                        sc.regime_policy, strategies,
+                        current_state.hrp_weights, bars,
+                    )
+                    if gate.passed and auto_apply:
+                        current_state = replace(
+                            current_state, regime_policy=sc.regime_policy,
+                        )
+                        save_ensemble_state(current_state, path=params_path)
+                        recommendations.append(
+                            "## 🧭 Regime policy AUTO-APPLIED ✅\n\n"
+                            f"{gate.summary()}\n\n"
+                            f"```json\n{json.dumps(sc.regime_policy, indent=2)}\n```\n\n"
+                            "Takes effect on the next daily run. "
+                            f"**Reasoning:** {sc.reasoning}"
+                        )
+                    else:
+                        verdict = ("gate PASSED but auto_apply is off"
+                                   if gate.passed else "gate REJECTED")
+                        recommendations.append(
+                            f"## 🧭 Regime policy proposed — NOT applied ({verdict})\n\n"
+                            f"{gate.summary()}\n\n"
+                            f"```json\n{json.dumps(sc.regime_policy, indent=2)}\n```"
+                        )
 
         # -------- 4. Sandbox + gate the proposed strategy --------------------
         if ai_report.proposed_strategy is None:

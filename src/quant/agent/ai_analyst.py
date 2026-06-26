@@ -93,6 +93,7 @@ Return a single JSON object with this exact shape:
     "sma_slow": <int in [50, 300] | null>,
     "mr_lookback": <int in [2, 30] | null>,
     "mr_threshold_pct": <float in (0.001, 0.1) | null>,
+    "regime_policy": <{"<strategy_name>": {"<regime_label>": <multiplier 0..1.5>}} | null — per-strategy, per-regime sleeve multipliers. regime_label ∈ {trend_up_calm, trend_up_stormy, trend_dn_calm, trend_dn_stormy}. Use the `candidate_regime_policy` in the Quant Diagnostics block as your starting point. This AUTO-APPLIES if it clears a backtest+DSR gate; propose it when signal_health shows a sleeve's IC is regime-dependent (e.g. dead in the current regime).>,
     "reasoning": "<quantitative evidence per ANALYST.md §6.5 — cite specific symbols, give-back magnitudes, or whipsaw counts from the daily runs table. Vague intuition is NOT acceptable.>"
   } | null,
   "pipeline_findings": [
@@ -210,6 +211,11 @@ class StateChangeProposal:
     sma_slow: int | None = None      # new SMA slow window (typical 100-250)
     mr_lookback: int | None = None   # new MR MA window (typical 3-10)
     mr_threshold_pct: float | None = None    # new MR deviation threshold (0.005-0.05)
+    # Phase 4: regime-conditional sleeve allocation. {strategy:{regime:mult}}.
+    # Unlike the other knobs (propose-only, operator edits by hand), this one
+    # AUTO-APPLIES if it clears the backtest+DSR gate in regime_gate.py — the
+    # operator's chosen "auto-apply behind gates" policy for the risk layer.
+    regime_policy: dict | None = None
     reasoning: str = ""              # quantitative evidence for the change
 
 
@@ -642,12 +648,14 @@ class AIAnalyst:
                 return int(raw) if raw is not None else None
 
             try:
+                rp = state_change_data.get("regime_policy")
                 state_change = StateChangeProposal(
                     trail_pct=_opt_float("trail_pct"),
                     sma_fast=_opt_int("sma_fast"),
                     sma_slow=_opt_int("sma_slow"),
                     mr_lookback=_opt_int("mr_lookback"),
                     mr_threshold_pct=_opt_float("mr_threshold_pct"),
+                    regime_policy=rp if isinstance(rp, dict) else None,
                     reasoning=str(state_change_data.get("reasoning", "")),
                 )
             except (TypeError, ValueError) as e:
