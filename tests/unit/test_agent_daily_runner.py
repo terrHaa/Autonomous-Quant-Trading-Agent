@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -848,3 +849,81 @@ def test_regime_filter_fails_open_without_spy_data(
     payload = json.loads(path.read_text())
     assert payload["deployment"]["regime"] == "unknown"
     assert payload["deployment"]["deploy_scale"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# _apply_inverse_vol_sizing — June 2026 risk-parity fix
+# ---------------------------------------------------------------------------
+
+
+def _make_vol_bars(vols: dict[str, float], n_days: int = 80) -> pd.DataFrame:
+    """Bars where each symbol has a prescribed daily-return volatility.
+
+    vols: {symbol: daily_return_std}. Deterministic per-symbol noise so
+    realized vol matches the spec closely.
+    """
+    rng = np.random.default_rng(42)
+    end = date(2024, 6, 2)
+    days = pd.bdate_range(end=pd.Timestamp(end, tz="UTC"), periods=n_days)
+    rows, idx = [], []
+    for sym, dv in vols.items():
+        c = 100.0
+        shocks = rng.normal(0, dv, size=n_days)
+        for k, ts in enumerate(days):
+            c *= (1 + shocks[k])
+            rows.append({"open": c, "high": c, "low": c, "close": c, "volume": 1})
+            idx.append((sym, ts))
+    return pd.DataFrame(
+        rows,
+        index=pd.MultiIndex.from_tuples(idx, names=["symbol", "timestamp"]),
+        columns=list(BAR_COLUMNS),
+    )
+
+
+def test_inverse_vol_sizing_preserves_gross_and_downweights_high_vol() -> None:
+    # LOWV ~16% annual, HIGHV ~64% annual (4x). Equal signal weights.
+    bars = _make_vol_bars({"LOWV": 0.01, "HIGHV": 0.04})
+    tw = {"LOWV": 0.10, "HIGHV": 0.10}
+    out = daily_runner._apply_inverse_vol_sizing(tw, bars)
+    # Gross preserved.
+    assert sum(out.values()) == pytest.approx(sum(tw.values()), rel=1e-6)
+    # High-vol name down-weighted relative to low-vol (was equal).
+    assert out["HIGHV"] < out["LOWV"]
+    # Roughly inverse to vol ratio (~4x) — allow wide band for noise.
+    assert 2.0 < (out["LOWV"] / out["HIGHV"]) < 6.0
+
+
+def test_inverse_vol_sizing_flips_weight_vol_correlation() -> None:
+    # Signal-proportional book that bets BIGGER on MORE volatile names.
+    vols = {"A": 0.01, "B": 0.02, "C": 0.03, "D": 0.04}
+    bars = _make_vol_bars(vols)
+    # Weight rises WITH vol (perverse) but slower than proportionally, so
+    # dividing by vol must invert the ordering -> negative correlation.
+    tw = {"A": 0.08, "B": 0.10, "C": 0.12, "D": 0.14}
+    realized = {s: bars.loc[s]["close"].pct_change().dropna().std() for s in vols}
+    out = daily_runner._apply_inverse_vol_sizing(tw, bars)
+    before = np.corrcoef([tw[s] for s in vols], [realized[s] for s in vols])[0, 1]
+    after = np.corrcoef([out[s] for s in vols], [realized[s] for s in vols])[0, 1]
+    assert before > 0.5     # started perverse
+    assert after < before   # de-correlated
+    assert after < 0        # now negative: smaller bets on more volatile names
+
+
+def test_inverse_vol_sizing_floor_caps_low_vol_concentration() -> None:
+    # A near-zero-vol name must NOT grab a runaway weight (vol_floor guard).
+    bars = _make_vol_bars({"CALM": 0.0008, "NORMAL": 0.02})
+    tw = {"CALM": 0.10, "NORMAL": 0.10}
+    out = daily_runner._apply_inverse_vol_sizing(tw, bars, vol_floor=0.15)
+    # With a 15% floor, CALM is treated as 15% vol, so its advantage over
+    # NORMAL (~32% vol) is ~2x, not the ~25x its raw vol would imply.
+    assert out["CALM"] / out["NORMAL"] < 4.0
+
+
+def test_inverse_vol_sizing_failsafe_on_no_history() -> None:
+    empty = pd.DataFrame(
+        [], index=pd.MultiIndex.from_tuples([], names=["symbol", "timestamp"]),
+        columns=list(BAR_COLUMNS),
+    )
+    tw = {"X": 0.1, "Y": 0.1}
+    assert daily_runner._apply_inverse_vol_sizing(tw, empty) == tw
+    assert daily_runner._apply_inverse_vol_sizing({}, empty) == {}

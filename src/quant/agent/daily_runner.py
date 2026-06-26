@@ -448,6 +448,110 @@ def _compute_atr_normalized_stops(
     return out
 
 
+def _apply_inverse_vol_sizing(
+    target_weights: dict[str, float],
+    bars,
+    *,
+    lookback: int = 60,
+    vol_floor: float = 0.15,
+    trading_days_per_year: int = 252,
+) -> dict[str, float]:
+    """Risk-balance the book: scale each name's weight by 1 / its vol.
+
+    Why this exists (June 2026 diagnosis): the strategies are momentum-
+    driven, so they rank the highest-momentum names highest — which in
+    this regime are the highest-VOLATILITY names (memory/semis at
+    75-100% annualized vol). Worse, the sizing was signal-proportional,
+    so the book put its BIGGEST bets on its MOST volatile names
+    (corr(weight, vol) measured at +0.59). The resulting basket vol was
+    ~41%, which the downstream vol-target overlay then had to crush to
+    ~29% gross to hit the 12% target — leaving ~70% of the book in cash
+    and inert.
+
+    The fix is volatility-scaled position sizing (standard risk-parity
+    practice): keep each name's directional conviction but divide its
+    weight by its own volatility, so a 100%-vol name gets ~1/5 the
+    weight of a 20%-vol name for the same signal. This equalizes risk
+    contribution, flips corr(weight, vol) negative, and pulls basket
+    vol down toward ~18-20% — so the vol-target overlay deploys ~60%
+    instead of ~30%. Same conviction, far better risk allocation,
+    materially less churn (high-vol names stop out constantly).
+
+    Mechanics:
+      - vol[sym] = annualized stdev of the last ``lookback`` daily
+        returns, FLOORED at ``vol_floor`` so a freakishly calm name
+        can't grab a runaway weight (a 5%-vol utility would otherwise
+        get 1/0.05 = 20x leverage into one name).
+      - raw[sym]    = weight[sym] / vol[sym]
+      - renormalize raw so its gross == the input gross (this step is
+        ONLY a re-distribution of existing exposure; it does NOT change
+        total deployment — that's the vol-target overlay's job).
+      - names with no usable vol history are sized at the cross-
+        sectional MEDIAN vol (neither favored nor penalized).
+
+    Fail-safe: empty input, no bars, or fewer than half the names with
+    usable history → return weights unchanged. Like vol-targeting, this
+    is an OPTIMIZATION layer, not a safety requirement.
+    """
+    import numpy as np  # noqa: PLC0415
+    import pandas as pd  # noqa: PLC0415
+
+    if not target_weights or bars is None or bars.empty:
+        return dict(target_weights)
+
+    syms = [s for s in target_weights if target_weights[s] > 0]
+    vols: dict[str, float] = {}
+    for sym in syms:
+        try:
+            closes = bars.loc[sym]["close"]
+            r = closes.pct_change().dropna().tail(lookback)
+            if len(r) >= 10:
+                vols[sym] = float(r.std() * np.sqrt(trading_days_per_year))
+        except (KeyError, ValueError, AttributeError):
+            continue
+
+    if len(vols) < len(syms) // 2:
+        # Too little history to risk-balance safely; leave weights as-is.
+        logger.info(
+            "inverse-vol sizing skipped: only %d of %d names have usable "
+            "vol history; keeping signal weights.",
+            len(vols), len(syms),
+        )
+        return dict(target_weights)
+
+    median_vol = float(pd.Series(vols).median())
+    raw: dict[str, float] = {}
+    for sym, w in target_weights.items():
+        if w <= 0:
+            raw[sym] = w   # preserve any non-positive entries verbatim
+            continue
+        v = max(vols.get(sym, median_vol), vol_floor)
+        raw[sym] = w / v
+
+    gross_in = sum(w for w in target_weights.values() if w > 0)
+    gross_raw = sum(w for w in raw.values() if w > 0)
+    if gross_raw <= 0:
+        return dict(target_weights)
+    scale = gross_in / gross_raw
+    out = {sym: (w * scale if w > 0 else w) for sym, w in raw.items()}
+
+    # Diagnostic: did we actually de-correlate weight from vol?
+    common = [s for s in syms if s in vols]
+    if len(common) >= 3:
+        w_before = np.array([target_weights[s] for s in common])
+        w_after = np.array([out[s] for s in common])
+        v_arr = np.array([vols[s] for s in common])
+        c_before = float(np.corrcoef(w_before, v_arr)[0, 1])
+        c_after = float(np.corrcoef(w_after, v_arr)[0, 1])
+        logger.info(
+            "inverse-vol sizing: corr(weight,vol) %.2f -> %.2f; "
+            "median name vol %.0f%%, gross preserved %.3f -> %.3f",
+            c_before, c_after, median_vol * 100, gross_in,
+            sum(w for w in out.values() if w > 0),
+        )
+    return out
+
+
 def _apply_vol_target(
     *,
     target_weights: dict[str, float],
@@ -755,6 +859,17 @@ def run_daily_trade(
         "ensemble emitted %d target positions (as_of=%s); %d strategies in shadow",
         len(target_weights), as_of, len(shadow_today),
     )
+
+    # --- 2b. Inverse-volatility position sizing (risk parity) ---
+    # Re-distribute weight by 1/vol so risk contribution is balanced
+    # across names. WITHOUT this, momentum selects high-vol names and
+    # signal-proportional sizing bets BIGGEST on the MOST volatile of
+    # them (corr(weight,vol) was +0.59), producing a ~41% basket vol
+    # that the vol-target overlay then crushes to ~30% gross — leaving
+    # the book inert in cash. This runs BEFORE the sector cap and
+    # vol-target so both operate on a risk-balanced book. It only
+    # re-distributes exposure; total deployment is still set downstream.
+    target_weights = _apply_inverse_vol_sizing(target_weights, bars)
 
     # --- 2c. Sector concentration cap (operator hard rule) ---
     # Trim any GICS sector exceeding MAX_SECTOR_WEIGHT (30%). Defends
