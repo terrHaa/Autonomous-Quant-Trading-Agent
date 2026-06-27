@@ -27,7 +27,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 _FACTOR_HISTORY_START = date(2023, 1, 1)
-_SIGNAL_HEALTH_LOOKBACK = 600
+_SIGNAL_HEALTH_LOOKBACK = 365  # 1yr; biweekly step keeps the monthly replay tractable
 
 
 def _book_returns(equity_curve: dict[date, float]) -> pd.Series:
@@ -154,6 +154,7 @@ def build_quant_diagnostics(
                 h = compute_signal_health(
                     s, bars, regime=trend_map or None,
                     lookback_days=_SIGNAL_HEALTH_LOOKBACK,
+                    step=10,   # biweekly: ~36 IC obs/yr, ~3× faster replay
                 )
                 health_dict[h.strategy_name] = {
                     "mean_ic": round(h.mean_ic, 4) if h.mean_ic == h.mean_ic else None,
