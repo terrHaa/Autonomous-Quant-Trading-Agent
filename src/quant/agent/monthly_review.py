@@ -556,6 +556,33 @@ def run_monthly_review(
                 type(e).__name__, e,
             )
 
+        # Pillar 5: implementation shortfall + operational reliability.
+        # Uses the bars index as the authoritative trading-day calendar so
+        # holidays aren't miscounted as missed trades. Best-effort.
+        try:
+            from quant.agent.reliability import (
+                compute_implementation_shortfall,
+                compute_reliability_scorecard,
+                render_reliability_md,
+            )
+            trading_days = None
+            if bars is not None and not bars.empty:
+                trading_days = {
+                    t.date() if hasattr(t, "date") else t
+                    for t in bars.index.get_level_values("timestamp").unique()
+                }
+            shortfall = compute_implementation_shortfall(daily_runs)
+            scorecard = compute_reliability_scorecard(trading_days=trading_days)
+            recommendations.append(render_reliability_md(shortfall, scorecard))
+            if isinstance(quant_diagnostics, dict):
+                quant_diagnostics["implementation_shortfall"] = shortfall
+                quant_diagnostics["reliability_scorecard"] = scorecard
+        except Exception as e:
+            logger.warning(
+                "monthly reliability scorecard failed (%s: %s) — continuing",
+                type(e).__name__, e,
+            )
+
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
