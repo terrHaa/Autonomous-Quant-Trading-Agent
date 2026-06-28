@@ -583,6 +583,20 @@ def run_monthly_review(
                 type(e).__name__, e,
             )
 
+        # Research-desk phase-gate readiness — tells the operator whether
+        # we're ready to start the next research-desk phase, evaluated
+        # against the live trial ledger + shadow queue. So phase-readiness
+        # lands in the inbox monthly instead of being tracked by hand.
+        try:
+            from quant.research import evaluate_readiness, render_readiness_md
+            readiness = evaluate_readiness()
+            recommendations.append(render_readiness_md(readiness))
+        except Exception as e:
+            logger.warning(
+                "monthly readiness reporter failed (%s: %s) — continuing",
+                type(e).__name__, e,
+            )
+
         analyst = AIAnalyst()
         ai_report = analyst.analyze(
             daily_runs=daily_runs,
