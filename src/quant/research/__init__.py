@@ -13,5 +13,16 @@ Public API:
 
 from quant.research.ab_test import ABResult, run_ab_test
 from quant.research.ledger import TrialLedger, TrialView
+from quant.research.promotion import PromotionDecision, evaluate_promotion
+from quant.research.shadow_queue import ShadowCandidate, ShadowQueue
 
-__all__ = ["ABResult", "TrialLedger", "TrialView", "run_ab_test"]
+__all__ = [
+    "ABResult",
+    "PromotionDecision",
+    "ShadowCandidate",
+    "ShadowQueue",
+    "TrialLedger",
+    "TrialView",
+    "evaluate_promotion",
+    "run_ab_test",
+]
