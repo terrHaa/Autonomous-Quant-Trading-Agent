@@ -48,3 +48,24 @@ def test_render_includes_signal_health_table() -> None:
     md = render_diagnostics_md(diag)
     assert "mr" in md
     assert "⚠" in md            # decay flag rendered
+
+
+def test_book_returns_has_datetime_index_for_factor_join() -> None:
+    """Regression: a datetime.date (object-dtype) index matched nothing
+    against the Timestamp-indexed factor panel — Pillar 3 reported
+    '0 common observations' on the 2026-07-02 monthly."""
+    from datetime import date
+
+    import pandas as pd
+
+    from quant.agent.monthly_diagnostics import _book_returns
+
+    eq = {date(2026, 6, d): 100000.0 + d * 100 for d in range(1, 8)}
+    book = _book_returns(eq)
+    assert isinstance(book.index, pd.DatetimeIndex)
+    # And it actually joins against a Timestamp-indexed frame.
+    fr = pd.DataFrame(
+        {"MKT": 0.001}, index=pd.DatetimeIndex([pd.Timestamp(d) for d in eq]),
+    )
+    joined = pd.concat([book.rename("p"), fr], axis=1, join="inner").dropna()
+    assert len(joined) == len(book)

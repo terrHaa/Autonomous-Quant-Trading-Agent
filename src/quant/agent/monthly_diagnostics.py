@@ -31,11 +31,18 @@ _SIGNAL_HEALTH_LOOKBACK = 365  # 1yr; biweekly step keeps the monthly replay tra
 
 
 def _book_returns(equity_curve: dict[date, float]) -> pd.Series:
+    """Daily book returns as a DatetimeIndex series.
+
+    MUST stay a DatetimeIndex: the factor panel from
+    ``compute_factor_returns`` is Timestamp-indexed and attribution
+    inner-joins the two. A raw ``datetime.date`` index (object dtype)
+    matches nothing against Timestamps — that bug made Pillar 3 report
+    "0 common observations" on the 2026-07-02 monthly review.
+    """
     if not equity_curve:
         return pd.Series(dtype=float)
     s = pd.Series(equity_curve).sort_index().pct_change().dropna()
     s.index = pd.DatetimeIndex([pd.Timestamp(d) for d in s.index])
-    s.index = [t.date() for t in s.index]
     return s
 
 

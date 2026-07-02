@@ -125,6 +125,17 @@ def top_movers(
         if sym in last_prices and p0 > 0:
             moves.append((sym, last_prices[sym] / p0 - 1.0))
     moves.sort(key=lambda x: x[1])
-    losers = [{"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[:n]]
-    gainers = [{"symbol": s, "move_pct": round(m * 100, 2)} for s, m in moves[-n:][::-1]]
+    # Sign-filter so the lists are disjoint by construction. Without this,
+    # fewer than 2n movers made moves[:n] and moves[-n:] OVERLAP — the
+    # 2026-07-02 monthly showed CSCO at -3.54% in both gainers and losers,
+    # which the AI analyst rightly flagged as a data artifact. A "gainer"
+    # must be up and a "loser" must be down; flat names appear in neither.
+    losers = [
+        {"symbol": s, "move_pct": round(m * 100, 2)}
+        for s, m in moves[:n] if m < 0
+    ]
+    gainers = [
+        {"symbol": s, "move_pct": round(m * 100, 2)}
+        for s, m in moves[-n:][::-1] if m > 0
+    ]
     return gainers, losers
