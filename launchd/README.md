@@ -14,7 +14,7 @@ few minutes before/after open; reports go out after close either way).
 |---|---|---|---|
 | `com.terrancehan.quant-daily-trade` | 21:35 Mon-Fri | 09:35 Mon-Fri | Compute targets, submit market entries with stop-losses |
 | `com.terrancehan.quant-daily-report` | 06:30 Tue-Sat | 18:30 Mon-Fri | Email a summary of today's trades |
-| `com.terrancehan.quant-weekly-review` | 06:30 Sat | 18:30 Fri | Refit HRP weights, email the week's aggregate |
+| `com.terrancehan.quant-weekly-review` | 06:30 **daily** (catch-up) | 18:30 Fri | Refit HRP weights, email the week's aggregate |
 | `com.terrancehan.quant-monthly-review` | 06:30 day-2 | 18:30 day-1 | Run improver (possibly auto-apply), email |
 
 The Mon-Fri / Tue-Sat / Sat / day-2 difference is because CST is
@@ -26,6 +26,20 @@ the agent loads the correct ET trading day's records.
 If you ever move the Mac to America/New_York, edit each plist back to
 the original ET times (09:35 / 16:05 / 16:30 Fri / 16:30 day-1) and
 remove the `--for-date` arg from the report commands.
+
+**Weekly review — catch-up on wake (changed 2026-07-05).** The weekly job
+no longer fires only on Saturday. A single Saturday-instant fire is fragile:
+if the Mac is asleep, off, or not-yet-networked at 06:30 Sat, the week's
+report is silently lost (this happened for weeks ending 2026-06-26 and
+2026-07-03). The plist now runs `weekly-review-catchup.sh` **every** morning
+at 06:30. That wrapper is idempotent — it targets the most recent completed
+week (Friday) and sends only if `data/agent/weekly_reports/<friday>.json`
+doesn't already exist, so six mornings out of seven it exits instantly. It
+also waits for DNS before running, fixing the "woke but Wi-Fi wasn't up yet"
+failure. Net effect: the report goes out on the first morning the Mac is
+awake **and** online after a Friday close — a Mac off all weekend still
+sends on Monday. To backfill an older missed week by hand:
+`uv run quant-weekly-review --for-date=YYYY-MM-DD`.
 
 ## First-time install
 

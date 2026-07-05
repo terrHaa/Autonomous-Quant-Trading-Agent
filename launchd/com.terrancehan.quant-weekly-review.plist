@@ -5,11 +5,23 @@
   Weekly REVIEW job: refits HRP weights across strategies, aggregates
   the week's daily-run JSONs, emails a summary.
 
-  Mac is on CST (+0800). 06:30 Saturday CST maps to:
-    - 18:30 Friday EDT (summer): 2.5h after Friday close.
-    - 17:30 Friday EST (winter): 1.5h after Friday close.
-  --for-date "yesterday CST" resolves to Friday CST = Friday ET, which
-  is the week_ending date the weekly_review function expects.
+  CATCH-UP DESIGN (changed 2026-07-05)
+  ------------------------------------
+  This no longer fires once at Sat 06:30 and hope the Mac is awake+online
+  at that instant. Two consecutive weeks were silently lost that way
+  (2026-06-26: job never fired; 2026-07-03: fired but the Mac had no
+  network). Instead it runs the IDEMPOTENT wrapper weekly-review-catchup.sh
+  EVERY morning at 06:30. The wrapper:
+    - sends only if THIS completed week's report isn't already saved, so
+      six mornings out of seven it exits in milliseconds;
+    - waits for DNS before running (fixes "woke but Wi-Fi not up yet");
+    - therefore catches up on the first morning the Mac is awake+online
+      after a Friday close — a Mac off all weekend still sends on Monday.
+
+  06:30 CST maps to the previous late-afternoon ET (after the US close):
+    18:30 prior-day EDT (summer) / 17:30 EST (winter). The wrapper itself
+  computes the target Friday, so the fire day no longer has to align with
+  a --for-date argument.
 -->
 <plist version="1.0">
 <dict>
@@ -20,14 +32,13 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>cd '/Users/terrancehan/Claude trader/quant' &amp;&amp; /opt/homebrew/bin/uv run quant-weekly-review --for-date "$(date -v-1d +%Y-%m-%d)"</string>
+        <string>'/Users/terrancehan/Claude trader/quant/launchd/weekly-review-catchup.sh'</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key><integer>6</integer>
         <key>Minute</key><integer>30</integer>
-        <key>Weekday</key><integer>6</integer>
     </dict>
 
     <key>WorkingDirectory</key>
