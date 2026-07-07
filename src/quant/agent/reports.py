@@ -209,6 +209,13 @@ def compute_deployment_fidelity(daily_runs: list[dict[str, Any]]) -> dict[str, A
         how many were actually placed vs failed. Repeat failers (same
         symbol failing 2+ days) get named: that pattern is how the
         trail-anchor re-entry deadlock stayed invisible for a week.
+      • surviving gross  — what's STILL INVESTED the next morning
+        (``positions_before`` × that morning's signal prices / equity).
+        This is the number the operator sees as "cash in the account".
+        July 2026 lesson: submitted gross said 44% while the account sat
+        80% cash — tight stops on high-vol names handed half the book
+        back to cash within a session or two. Submitted-vs-surviving is
+        the stop-churn gap, and it was invisible until this metric.
 
     Returns {} when ``daily_runs`` is empty. Pure function — safe in tests.
     """
@@ -217,6 +224,7 @@ def compute_deployment_fidelity(daily_runs: list[dict[str, Any]]) -> dict[str, A
 
     ens_gross: list[float] = []
     sub_gross: list[float] = []
+    surv_gross: list[float] = []
     n_entries_placed = 0
     n_entries_failed = 0
     fail_days: dict[str, int] = {}
@@ -228,6 +236,18 @@ def compute_deployment_fidelity(daily_runs: list[dict[str, Any]]) -> dict[str, A
             ens_gross.append(sum(tw.values()))
         if etw:
             sub_gross.append(sum(etw.values()))
+        # Surviving exposure at THIS run's open = what outlived the prior
+        # day's stops. positions_before is the broker snapshot; price it
+        # with today's signal prices (same names, no look-ahead).
+        pb = er.get("positions_before", {})
+        sp = run.get("signal_prices", {})
+        eq = er.get("account_equity_before")
+        if pb and eq:
+            mv = sum(
+                q * sp[s] for s, q in pb.items()
+                if isinstance(q, (int, float)) and q > 0 and sp.get(s, 0) > 0
+            )
+            surv_gross.append(mv / float(eq))
         failed_today: set[str] = set()
         for o in er.get("submitted_orders", []):
             if o.get("role") != "entry":
@@ -249,6 +269,12 @@ def compute_deployment_fidelity(daily_runs: list[dict[str, Any]]) -> dict[str, A
         "submitted_gross_pct_latest": round(sub_gross[-1] * 100, 1) if sub_gross else None,
         "submitted_gross_pct_week_avg": (
             round(sum(sub_gross) / len(sub_gross) * 100, 1) if sub_gross else None
+        ),
+        "surviving_gross_pct_latest": (
+            round(surv_gross[-1] * 100, 1) if surv_gross else None
+        ),
+        "surviving_gross_pct_week_avg": (
+            round(sum(surv_gross) / len(surv_gross) * 100, 1) if surv_gross else None
         ),
         "entries_intended_week": n_intended,
         "entries_failed_week": n_entries_failed,
@@ -286,6 +312,12 @@ def _deployment_fidelity_lines(daily_runs: list[dict[str, Any]]) -> list[str]:
         f"| {df['submitted_gross_pct_latest']}% "
         f"| {df['submitted_gross_pct_week_avg']}% |"
     )
+    if df.get("surviving_gross_pct_latest") is not None:
+        lines.append(
+            f"| Surviving gross (still held next morning) "
+            f"| {df['surviving_gross_pct_latest']}% "
+            f"| {df['surviving_gross_pct_week_avg']}% |"
+        )
     if df["entry_fidelity_pct"] is not None:
         lines.append(
             f"| Entry fidelity (placed / planned) "
@@ -299,6 +331,16 @@ def _deployment_fidelity_lines(daily_runs: list[dict[str, Any]]) -> list[str]:
             f"⚠️ **Under-deployed:** the book averaged {sub}% gross this week "
             "— most of the account sat in cash. Check the dust filter, "
             "vol-target scale, and entry failures below."
+        )
+        lines.append("")
+    surv = df.get("surviving_gross_pct_week_avg")
+    if sub is not None and surv is not None and surv < sub * 0.7:
+        lines.append(
+            f"⚠️ **Stop churn:** only {surv}% of equity survives to the next "
+            f"morning vs {sub}% submitted — stops are handing "
+            f"~{sub - surv:.0f}pts of exposure back to cash within a "
+            "session, paying spread both ways. Stop distance vs holding "
+            "volatility is mismatched."
         )
         lines.append("")
     failers = df.get("repeat_entry_failers", {})

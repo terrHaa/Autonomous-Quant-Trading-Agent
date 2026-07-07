@@ -234,3 +234,41 @@ def test_weekly_report_renders_deployment_section() -> None:
     assert "Deployment & execution fidelity" in body
     assert "Under-deployed" in body          # 24% avg < 50% triggers warning
     assert "CIEN" in body                     # repeat failer named
+
+
+def test_deployment_fidelity_surviving_gross() -> None:
+    """July 2026: submitted said 44%, account sat 80% cash. Surviving
+    gross (positions_before x signal prices / equity) exposes the gap."""
+    run = {
+        "date": "2026-07-02",
+        "target_weights": {"A": 0.2, "B": 0.2},
+        "signal_prices": {"A": 10.0, "B": 20.0},
+        "execution_report": {
+            "target_weights": {"A": 0.2, "B": 0.2},   # 40% submitted
+            "account_equity_before": 100_000.0,
+            "positions_before": {"A": 1000, "B": 500},  # 10k+10k = 20% survived
+            "submitted_orders": [],
+        },
+    }
+    from quant.agent.reports import compute_deployment_fidelity
+    df = compute_deployment_fidelity([run])
+    assert df["submitted_gross_pct_latest"] == 40.0
+    assert df["surviving_gross_pct_latest"] == 20.0
+
+
+def test_stop_churn_warning_renders_when_surviving_lags_submitted() -> None:
+    from quant.agent.reports import _deployment_fidelity_lines
+    run = {
+        "date": "2026-07-02",
+        "target_weights": {"A": 0.44},
+        "signal_prices": {"A": 10.0},
+        "execution_report": {
+            "target_weights": {"A": 0.44},
+            "account_equity_before": 100_000.0,
+            "positions_before": {"A": 2000},   # 20% surviving vs 44% submitted
+            "submitted_orders": [],
+        },
+    }
+    text = "\n".join(_deployment_fidelity_lines([run]))
+    assert "Surviving gross" in text
+    assert "Stop churn" in text
