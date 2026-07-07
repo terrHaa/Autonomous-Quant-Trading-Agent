@@ -1187,3 +1187,34 @@ def test_cancel_agent_orders_cancels_stops_on_non_held_symbols() -> None:
         f"expected 1 cancelled (the orphan stop); got {n_cancelled}, err={err}"
     )
     assert "stop-orphan-1" in client.cancelled_ids
+
+
+def test_closeout_uses_post_cancel_positions_no_double_sell() -> None:
+    """T-bug 2026-07-02 (VZ -32): a GTC stop that fills between the
+    position snapshot and the cancel pass left the snapshot stale — the
+    close-out then re-sold shares the stop had already sold, opening a
+    short. Fix: cancel FIRST, then snapshot. This fake simulates the stop
+    fill landing during the cancel scan; the run must NOT sell VZ.
+    """
+    class _RaceyClient(_FakeTradingClient):
+        def get_orders(self, *, filter=None) -> list:
+            # The moment the cancel pass scans open orders, simulate that
+            # VZ's stop has ALREADY filled: 32 shares are gone.
+            self._positions["VZ"] = 0
+            return []
+
+    client = _RaceyClient(equity=100_000, positions={"VZ": 32})
+    exec_ = AlpacaExecutor(trading_client=client)
+    report = exec_.submit_daily_rebalance(
+        target_weights={"AAPL": 0.1},          # VZ not in targets → close-out candidate
+        signal_prices={"AAPL": 200.0, "VZ": 42.0},
+        stop_loss_pct=0.05,
+    )
+    vz_sells = [
+        r for r in report.submitted_orders
+        if r.symbol == "VZ" and r.side == "sell"
+    ]
+    assert not vz_sells, (
+        f"stale-snapshot close-out re-sold VZ after its stop already "
+        f"filled → short. Orders: {[(r.symbol, r.side, r.qty) for r in report.submitted_orders]}"
+    )

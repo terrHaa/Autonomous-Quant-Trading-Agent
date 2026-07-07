@@ -547,12 +547,43 @@ class AlpacaExecutor:
             )
 
         equity = self.get_equity()
-        positions = self.get_positions()
         now = datetime.now(UTC)
         submitted: list[SubmittedOrder] = []
         max_notional = max_position_weight * equity
 
-        # ---- 0. Short auto-cover ---------------------------------------
+        # ---- 0a. Cancel only OUR open orders — FIRST, before reading
+        # positions. Order matters (T-bug 2026-07-02, the VZ -32 short):
+        # the old sequence was fetch-positions → cancel → close-outs, so a
+        # GTC stop that FILLED in the window between the snapshot and the
+        # cancel pass left the snapshot stale — the close-out then re-sold
+        # shares the stop had already sold, opening a short. Cancelling
+        # first means no agent order can change positions mid-run, so the
+        # snapshot taken AFTER the cancel pass stays authoritative for
+        # everything downstream (covers, plan, close-outs).
+        #
+        # T3.16: cancellation is selective — only orders tagged with our
+        # agent prefix in client_order_id. Manual operator orders are left
+        # alone. Idempotent: no-op if nothing is pending.
+        if not dry_run:
+            n_cancelled, cancel_err = self._cancel_agent_orders()
+            if cancel_err:
+                # Cancellation failure is bad but recoverable — log it
+                # on the report and proceed; the broker will refuse
+                # duplicate orders rather than silently double-fill.
+                submitted.append(SubmittedOrder(
+                    symbol="(agent-tagged)",
+                    side="sell",
+                    qty=0,
+                    status="failed",
+                    role="entry",
+                    error=f"selective cancel failed: {cancel_err}",
+                ))
+
+        # ---- 0b. Position snapshot — taken after the cancel pass so it
+        # cannot be invalidated by an agent stop filling mid-run.
+        positions = self.get_positions()
+
+        # ---- 0c. Short auto-cover ---------------------------------------
         # T-bug 2026-06-09: AMD ended at -9 short after an orphan stop fired
         # against a 0 position. submit_daily_rebalance is long-only by
         # policy (negative target weights are already rejected above) but
@@ -611,31 +642,6 @@ class AlpacaExecutor:
                 # of whether the cover order succeeded. Worst case: tomorrow's
                 # run sees the same short again and retries.
                 positions = {k: v for k, v in positions.items() if k != sym}
-
-        # ---- 1. Cancel only OUR open orders. ------------------------
-        # T3.16: cancel_orders() was indiscriminate — it would kill any
-        # manual orders the operator placed. We now scan open orders
-        # and only cancel those tagged with our agent prefix in
-        # client_order_id. Manual orders (which have a different prefix
-        # or no prefix) are left alone.
-        #
-        # Without this, yesterday's GTC stops would linger and double up
-        # with today's. cancel_orders() is idempotent — no-op if nothing
-        # is pending.
-        if not dry_run:
-            n_cancelled, cancel_err = self._cancel_agent_orders()
-            if cancel_err:
-                # Cancellation failure is bad but recoverable — log it
-                # on the report and proceed; the broker will refuse
-                # duplicate orders rather than silently double-fill.
-                submitted.append(SubmittedOrder(
-                    symbol="(agent-tagged)",
-                    side="sell",
-                    qty=0,
-                    status="failed",
-                    role="entry",
-                    error=f"selective cancel failed: {cancel_err}",
-                ))
 
         # ---- 2. PLAN the day's actions, signal-driven ---------------
         # For each in-target symbol, decide one of four outcomes:
