@@ -1250,31 +1250,96 @@ def _repair_oto_stops_to_fill_price(
                 child_stop_id = getattr(leg, "id", None)
                 break
 
-        try:
-            if child_stop_id:
-                client.cancel_order_by_id(child_stop_id)
-            # Tag with agent prefix so tomorrow's selective cancel
-            # picks this up (otherwise the repair stop is anonymous
-            # and would only be caught by the OTO-child heuristic).
-            import time as _time
-            new_stop_req = StopOrderRequest(
-                symbol=sym,
-                qty=int(entry.qty),
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                stop_price=new_stop_price,
-                client_order_id=f"qagent-repair-{sym}-{int(_time.time() * 1000)}",
-            )
-            client.submit_order(new_stop_req)
+        # Tag with agent prefix so tomorrow's selective cancel picks this
+        # up (otherwise the repair stop is anonymous and would only be
+        # caught by the OTO-child heuristic).
+        import time as _time
+        new_stop_req = StopOrderRequest(
+            symbol=sym,
+            qty=int(entry.qty),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            stop_price=new_stop_price,
+            client_order_id=f"qagent-repair-{sym}-{int(_time.time() * 1000)}",
+        )
+        # poll_wait = 0 in tests (fill_wait_seconds=0) keeps this synchronous.
+        ok = _cancel_then_submit_stop(
+            client, child_stop_id, new_stop_req,
+            poll_wait=0.5 if wait_seconds > 0 else 0.0,
+        )
+        if ok:
             logger.info(
                 "stop repair: %s filled at %.2f (signal %.2f, drift %.1f%%) — "
                 "stop moved to %.2f (was anchored at %.2f)",
                 sym, fill_px, signal_price, drift * 100,
                 new_stop_price, round(signal_price * (1.0 - per_sym_pct), 2),
             )
-        except Exception as e:
+        else:
             logger.warning(
-                "stop repair: failed to replace stop for %s: %s. "
+                "stop repair: could not re-anchor stop for %s after retries. "
                 "Original OTO stop remains active (anchored to signal price).",
-                sym, e,
+                sym,
             )
+
+
+def _cancel_then_submit_stop(
+    client: Any,
+    child_stop_id: str | None,
+    new_stop_req: Any,
+    *,
+    poll_wait: float,
+    max_attempts: int = 4,
+) -> bool:
+    """Cancel the OTO child stop, WAIT for the cancel to settle, then submit.
+
+    The 2026-07 bug (51 straight repair failures, 0 successes): the old
+    code cancelled the child stop and submitted the replacement in the
+    same breath. Broker cancellation is asynchronous — for a moment after
+    cancel the shares are still ``held_for_orders`` by the dying stop, so
+    the new stop is rejected with ``insufficient qty available``
+    (code 40310000). Every re-anchor failed and stops silently stayed at
+    the prior-close level — the exact churn interaction the repair exists
+    to prevent.
+
+    Fix: cancel, poll until the child order actually reports cancelled
+    (or has vanished), THEN submit — and retry the submit a few times on
+    the transient insufficient-qty error, since the freed shares can lag
+    the cancel confirmation by a beat. Non-transient errors raise on the
+    first attempt. Returns True iff the replacement stop was placed.
+    """
+    import time as _time
+
+    if child_stop_id:
+        try:
+            client.cancel_order_by_id(child_stop_id)
+        except Exception as e:  # noqa: BLE001 — cancel failure handled by retry loop
+            logger.warning("stop repair: cancel of %s failed: %s", child_stop_id, e)
+        # Confirm the cancel settled before competing for the shares.
+        for _ in range(max_attempts):
+            try:
+                ch = client.get_order_by_id(child_stop_id)
+            except Exception:  # noqa: BLE001
+                ch = None
+            status = getattr(getattr(ch, "status", None), "value", "") if ch else ""
+            if ch is None or status in ("canceled", "cancelled", "filled", "expired"):
+                break
+            if poll_wait > 0:
+                _time.sleep(poll_wait)
+
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            client.submit_order(new_stop_req)
+            return True
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            msg = str(e).lower()
+            transient = "insufficient qty" in msg or "40310000" in msg or "available" in msg
+            if not transient:
+                logger.warning("stop repair: non-transient submit error: %s", e)
+                return False
+            if poll_wait > 0 and attempt < max_attempts - 1:
+                _time.sleep(poll_wait)
+    if last_exc is not None:
+        logger.warning("stop repair: submit still failing after retries: %s", last_exc)
+    return False

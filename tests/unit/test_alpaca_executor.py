@@ -1218,3 +1218,74 @@ def test_closeout_uses_post_cancel_positions_no_double_sell() -> None:
         f"stale-snapshot close-out re-sold VZ after its stop already "
         f"filled → short. Orders: {[(r.symbol, r.side, r.qty) for r in report.submitted_orders]}"
     )
+
+
+def test_stop_repair_retries_through_insufficient_qty_race() -> None:
+    """The 2026-07 bug: cancel is async, so the first replacement-stop
+    submit hits 'insufficient qty available' while the cancelled stop
+    still holds the shares. The repair must confirm-cancel + retry, not
+    give up on the first rejection."""
+    from types import SimpleNamespace
+
+    from alpaca.trading.requests import StopOrderRequest
+
+    from quant.execution.alpaca_executor import _cancel_then_submit_stop
+
+    calls = {"submit": 0, "get": 0}
+
+    class _Racey:
+        def cancel_order_by_id(self, oid):
+            pass
+
+        def get_order_by_id(self, oid):
+            # First poll: still 'held'; second: cancelled.
+            calls["get"] += 1
+            st = "held" if calls["get"] < 2 else "canceled"
+            return SimpleNamespace(status=SimpleNamespace(value=st))
+
+        def submit_order(self, req):
+            calls["submit"] += 1
+            if calls["submit"] == 1:
+                raise RuntimeError(
+                    '{"available":"0","code":40310000,"message":'
+                    '"insufficient qty available for order"}'
+                )
+            return SimpleNamespace(id="repair-stop-1")
+
+    req = StopOrderRequest(
+        symbol="AAPL", qty=10, side=__import__(
+            "alpaca.trading.enums", fromlist=["OrderSide"]).OrderSide.SELL,
+        time_in_force=__import__(
+            "alpaca.trading.enums", fromlist=["TimeInForce"]).TimeInForce.GTC,
+        stop_price=209.0,
+    )
+    ok = _cancel_then_submit_stop(_Racey(), "child-1", req, poll_wait=0.0)
+    assert ok is True
+    assert calls["submit"] == 2   # retried past the transient rejection
+
+
+def test_stop_repair_gives_up_on_non_transient_error() -> None:
+
+    from alpaca.trading.requests import StopOrderRequest
+
+    from quant.execution.alpaca_executor import _cancel_then_submit_stop
+
+    class _Broken:
+        def cancel_order_by_id(self, oid):
+            pass
+
+        def get_order_by_id(self, oid):
+            return None
+
+        def submit_order(self, req):
+            raise RuntimeError("account is not authorized to trade")
+
+    req = StopOrderRequest(
+        symbol="AAPL", qty=10, side=__import__(
+            "alpaca.trading.enums", fromlist=["OrderSide"]).OrderSide.SELL,
+        time_in_force=__import__(
+            "alpaca.trading.enums", fromlist=["TimeInForce"]).TimeInForce.GTC,
+        stop_price=209.0,
+    )
+    ok = _cancel_then_submit_stop(_Broken(), "child-1", req, poll_wait=0.0)
+    assert ok is False
