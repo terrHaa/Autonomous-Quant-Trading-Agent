@@ -1259,8 +1259,8 @@ def test_stop_repair_retries_through_insufficient_qty_race() -> None:
             "alpaca.trading.enums", fromlist=["TimeInForce"]).TimeInForce.GTC,
         stop_price=209.0,
     )
-    ok = _cancel_then_submit_stop(_Racey(), "child-1", req, poll_wait=0.0)
-    assert ok is True
+    out = _cancel_then_submit_stop(_Racey(), "child-1", req, poll_wait=0.0)
+    assert out == "reanchored"
     assert calls["submit"] == 2   # retried past the transient rejection
 
 
@@ -1287,5 +1287,43 @@ def test_stop_repair_gives_up_on_non_transient_error() -> None:
             "alpaca.trading.enums", fromlist=["TimeInForce"]).TimeInForce.GTC,
         stop_price=209.0,
     )
-    ok = _cancel_then_submit_stop(_Broken(), "child-1", req, poll_wait=0.0)
-    assert ok is False
+    out = _cancel_then_submit_stop(_Broken(), "child-1", req, poll_wait=0.0)
+    assert out == "failed"
+
+
+def test_stop_repair_falls_back_to_signal_level_when_reanchor_fails() -> None:
+    """Safety net (2026-07-10): if the fill-anchored stop can't be placed
+    after a confirmed cancel, restore protection at the ORIGINAL
+    signal-anchored level so the position is never left MORE exposed."""
+    from types import SimpleNamespace
+
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import StopOrderRequest
+
+    from quant.execution.alpaca_executor import _cancel_then_submit_stop
+
+    submitted = []
+
+    class _Client:
+        def cancel_order_by_id(self, oid):
+            pass
+
+        def get_order_by_id(self, oid):
+            return None                       # cancel confirmed (shares freed)
+
+        def submit_order(self, req):
+            # The tighter fill-anchored stop is rejected; the fallback
+            # (looser, at signal level) goes through.
+            if req.stop_price > 200.0:
+                raise RuntimeError("account restriction on this price")
+            submitted.append(req.stop_price)
+            return SimpleNamespace(id="fb-1")
+
+    primary = StopOrderRequest(symbol="X", qty=10, side=OrderSide.SELL,
+                               time_in_force=TimeInForce.GTC, stop_price=209.0)
+    fallback = StopOrderRequest(symbol="X", qty=10, side=OrderSide.SELL,
+                                time_in_force=TimeInForce.GTC, stop_price=190.0)
+    out = _cancel_then_submit_stop(_Client(), "child-1", primary,
+                                   poll_wait=0.0, fallback_req=fallback)
+    assert out == "fallback"
+    assert submitted == [190.0]              # original protection restored
