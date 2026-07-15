@@ -76,14 +76,46 @@ def test_gate_fails_open_on_infrastructure_error(tmp_path) -> None:
     assert "failed open" in v.reason
 
 
-def test_gate_fails_closed_on_desync(tmp_path) -> None:
+def test_gate_halts_on_phantom_short(tmp_path) -> None:
+    """Ledger shows a name SHORT that we hold long → the dangerous July-7
+    signature → halt."""
     prev = {"execution_report": {
-        "positions_before": {"APA": 25},
+        "positions_before": {"AMD": 5},
         "timestamp": _TS.isoformat(),
     }}
-    v = gate_positions(_FakeExec({"APA": 2}, []), prev_run=prev,
+    # Reconstruction expects long 5, ledger claims short -5.
+    v = gate_positions(_FakeExec({"AMD": -5}, []), prev_run=prev,
                        override_path=tmp_path / "missing.json")
     assert not v.ok
+    assert "phantom short" in v.reason
+
+
+def test_gate_halts_on_wholesale_desync(tmp_path) -> None:
+    """Most of the book disagrees → wholesale desync → halt."""
+    baseline = {f"S{i}": 1 for i in range(10)}
+    prev = {"execution_report": {
+        "positions_before": baseline, "timestamp": _TS.isoformat(),
+    }}
+    ledger = {f"S{i}": 1 for i in range(3)}   # 7 of 10 vanished
+    v = gate_positions(_FakeExec(ledger, []), prev_run=prev,
+                       override_path=tmp_path / "missing.json")
+    assert not v.ok
+    assert "wholesale" in v.reason
+
+
+def test_gate_trades_through_minor_drift(tmp_path) -> None:
+    """2-of-37 stray-share drift (the 2026-07-15 false positive) must NOT
+    halt the whole book — trade, and let the audit reconcile."""
+    baseline = {f"S{i}": 1 for i in range(37)}
+    prev = {"execution_report": {
+        "positions_before": baseline, "timestamp": _TS.isoformat(),
+    }}
+    # 2 names show 0 at the broker (stopped out; reconstruction missed exit).
+    ledger = {f"S{i}": 1 for i in range(37) if i not in (5, 12)}
+    v = gate_positions(_FakeExec(ledger, []), prev_run=prev,
+                       override_path=tmp_path / "missing.json")
+    assert v.ok                       # <-- trades, does not halt
+    assert "minor drift" in v.reason
 
 
 def test_pinned_baseline_overrides_stale_run_record(tmp_path) -> None:

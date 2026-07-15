@@ -172,7 +172,7 @@ def gate_positions(
         )
     try:
         ts = datetime.fromisoformat(str(ts_raw))
-        return reconcile_positions(executor, baseline, ts)
+        recon = reconcile_positions(executor, baseline, ts)
     except Exception as e:
         logger.warning(
             "position gate: reconciliation errored (%s: %s) — failing OPEN",
@@ -181,3 +181,55 @@ def gate_positions(
         return PositionReconciliation(
             ok=True, reason=f"gate errored ({type(e).__name__}) — failed open",
         )
+    return _classify_severity(recon)
+
+
+# A halt is only justified for the DANGEROUS signature — not any mismatch.
+# T-incident 2026-07-15: the gate blocked ALL trading for days over a
+# 2-of-37 stray-share drift (GLW 2, WDC 1 — leftovers the reconstruction
+# missed exiting). Fill-reconstruction ALWAYS drifts by a few shares over
+# time (pagination limits, partial fills, corporate actions), so a
+# fail-closed-on-any-mismatch gate is guaranteed to eventually halt
+# everything. That did more damage than the July-7 desync it guards
+# against. Halt only when the mismatch looks like that real event:
+#   • a PHANTOM SHORT — the ledger shows a name short that we don't hold
+#     short (the dangerous case that mints naked sells), OR
+#   • a WHOLESALE desync — a large FRACTION of the book disagrees.
+# Everything else is minor drift: log it and TRADE; the daily audit's
+# reconciliation is the backstop that surfaces stragglers next morning.
+_MATERIAL_FRACTION = 0.34
+
+
+def _classify_severity(recon: PositionReconciliation) -> PositionReconciliation:
+    if recon.ok or not recon.mismatches:
+        return recon
+    mm = recon.mismatches
+    phantom_shorts = {
+        s: (r, lq) for s, (r, lq) in mm.items() if lq < 0 <= r
+    }
+    frac = len(mm) / recon.checked if recon.checked else 1.0
+    if phantom_shorts:
+        return PositionReconciliation(
+            ok=False,
+            reason=f"phantom short(s) in ledger: {sorted(phantom_shorts)}",
+            mismatches=mm, checked=recon.checked,
+        )
+    if frac > _MATERIAL_FRACTION:
+        return PositionReconciliation(
+            ok=False,
+            reason=f"wholesale desync — {len(mm)}/{recon.checked} names "
+                   f"({frac:.0%}) disagree",
+            mismatches=mm, checked=recon.checked,
+        )
+    # Minor drift — trade anyway; the daily audit will surface stragglers.
+    logger.warning(
+        "position gate: minor drift (%d/%d names: %s) — trading; "
+        "daily audit will reconcile.",
+        len(mm), recon.checked,
+        ", ".join(f"{s}(exp {r}/led {lq})" for s, (r, lq) in sorted(mm.items())),
+    )
+    return PositionReconciliation(
+        ok=True,
+        reason=f"minor drift on {len(mm)}/{recon.checked} names — traded",
+        mismatches=mm, checked=recon.checked,
+    )
