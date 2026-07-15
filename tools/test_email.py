@@ -15,11 +15,9 @@ non-zero on failure so it's usable in a checklist.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone  # timezone.utc: runs on py<3.11 too
+from datetime import UTC, datetime
 
 from quant.agent.email_sender import EmailConfig, EmailSender
-
-UTC = timezone.utc
 
 
 def main() -> int:
