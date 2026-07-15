@@ -44,11 +44,25 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+# HTTPS email providers. These POST to a REST API on port 443 — which
+# demonstrably works from the operator's China network (Anthropic + Alpaca
+# both reach 443) — where outbound SMTP (587/465) is chronically reset.
+# T-incident 2026-07-15: an SMTP-only alert path meant a days-long silent
+# trading halt because every "refused to trade" / audit-failure email died
+# at the SMTP layer and never reached the operator. HTTPS delivery is the
+# fix. See tools + .env.example for activation.
+_HTTP_PROVIDERS = ("resend", "sendgrid")
+
 
 @dataclass(frozen=True)
 class EmailConfig:
-    """SMTP + From/To configuration. Frozen because reload-mid-send would
-    be a mess; rebuild a new instance instead."""
+    """Email transport + From/To configuration. Frozen because reload-mid-
+    send would be a mess; rebuild a new instance instead.
+
+    ``http_provider`` selects the transport: one of ``_HTTP_PROVIDERS`` for
+    HTTPS delivery (443, reliable from China), or "" for SMTP (legacy
+    fallback). When an HTTPS provider is set, the SMTP fields may be blank.
+    """
 
     smtp_host: str
     smtp_port: int
@@ -56,30 +70,60 @@ class EmailConfig:
     smtp_password: str
     sender: str
     default_recipient: str
+    http_provider: str = ""      # "resend" | "sendgrid" | "" (=SMTP)
+    http_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> EmailConfig:
         """Build from environment variables (loaded from ``.env`` if present).
 
-        Required env vars (any missing → RuntimeError with a helpful message):
-            SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD,
-            REPORT_FROM, REPORT_TO
+        Transport chosen by ``EMAIL_PROVIDER`` (default "smtp"):
+          - ``resend`` / ``sendgrid``: needs ``<PROVIDER>_API_KEY`` +
+            REPORT_FROM + REPORT_TO. SMTP vars optional.
+          - ``smtp`` (default): needs SMTP_HOST/PORT/USERNAME/PASSWORD +
+            REPORT_FROM + REPORT_TO (the legacy path).
         """
         load_dotenv()
+        provider = (os.environ.get("EMAIL_PROVIDER") or "smtp").strip().lower()
+        sender = os.environ.get("REPORT_FROM") or os.environ.get("SMTP_USERNAME")
+        recipient = os.environ.get("REPORT_TO")
+
+        if provider in _HTTP_PROVIDERS:
+            api_key = os.environ.get(f"{provider.upper()}_API_KEY")
+            missing = [
+                name for name, val in [
+                    (f"{provider.upper()}_API_KEY", api_key),
+                    ("REPORT_FROM", sender),
+                    ("REPORT_TO", recipient),
+                ] if not val
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"EMAIL_PROVIDER={provider} but missing: {missing}. "
+                    "See .env.example for setup."
+                )
+            return cls(
+                smtp_host="", smtp_port=0, smtp_username="", smtp_password="",
+                sender=sender, default_recipient=recipient,
+                http_provider=provider, http_api_key=api_key,
+            )
+
+        # Legacy SMTP path.
         required = {
             "SMTP_HOST": os.environ.get("SMTP_HOST"),
             "SMTP_PORT": os.environ.get("SMTP_PORT"),
             "SMTP_USERNAME": os.environ.get("SMTP_USERNAME"),
             "SMTP_PASSWORD": os.environ.get("SMTP_PASSWORD"),
-            "REPORT_FROM": os.environ.get("REPORT_FROM") or os.environ.get("SMTP_USERNAME"),
-            "REPORT_TO": os.environ.get("REPORT_TO"),
+            "REPORT_FROM": sender,
+            "REPORT_TO": recipient,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise RuntimeError(
                 f"missing email environment variables: {missing}. "
                 f"Fill them in .env per the comments in .env.example. "
-                f"(Gmail SMTP requires 2FA + a 16-char app password.)"
+                f"(Gmail SMTP requires 2FA + a 16-char app password. Or set "
+                f"EMAIL_PROVIDER=resend for HTTPS delivery.)"
             )
         try:
             port_int = int(required["SMTP_PORT"])
@@ -117,16 +161,20 @@ class EmailSender:
         config: EmailConfig | None = None,
         *,
         smtp_client_factory: Any | None = None,
+        http_post: Any | None = None,
     ) -> None:
         """Initialize with a config (loaded from env if None).
 
         ``smtp_client_factory`` is a callable that returns an object with
         ``.starttls / .login / .send_message / .quit`` methods —
         injected by tests so we don't need a real SMTP server.
-        Production code leaves it None and we use ``smtplib.SMTP``.
+        ``http_post`` is an injectable ``requests.post``-shaped callable
+        for testing the HTTPS transport without network.
+        Production code leaves both None.
         """
         self._config = config or EmailConfig.from_env()
         self._smtp_factory = smtp_client_factory
+        self._http_post = http_post
 
     @property
     def config(self) -> EmailConfig:
@@ -158,6 +206,14 @@ class EmailSender:
             default.
         """
         to = recipient or self._config.default_recipient
+
+        # HTTPS transport (port 443, reliable from China) takes precedence
+        # when configured. This is the primary path post-2026-07-15.
+        if self._config.http_provider in _HTTP_PROVIDERS:
+            self._send_http(
+                subject=subject, body_text=body_text, body_html=body_html, to=to,
+            )
+            return
 
         # Use 'alternative' multipart so the mail client picks the
         # richest version it supports.
@@ -224,3 +280,80 @@ class EmailSender:
             ) from e
         except smtplib.SMTPException as e:
             raise RuntimeError(f"SMTP send failed: {e}") from e
+
+    # ---- HTTPS transport (Resend / SendGrid, port 443) ------------------
+
+    def _send_http(
+        self, *, subject: str, body_text: str, body_html: str | None, to: str,
+    ) -> None:
+        """POST the email to the configured HTTPS provider's REST API.
+
+        Retries the POST as a unit on connection-level errors (same policy
+        as SMTP), raises RuntimeError on a non-2xx response or exhausted
+        retries. Runs over 443, which is reachable where SMTP is not.
+        """
+        import requests
+
+        from quant.util.retry import retry_on_transient
+
+        url, headers, payload = _build_http_request(
+            self._config.http_provider, self._config.http_api_key,
+            sender=self._config.sender, to=to,
+            subject=subject, body_text=body_text, body_html=body_html,
+        )
+        post = self._http_post or requests.post
+
+        def _do_post():
+            resp = post(url, headers=headers, json=payload, timeout=30)
+            code = getattr(resp, "status_code", 0)
+            if not (200 <= code < 300):
+                body = getattr(resp, "text", "")
+                # 4xx = permanent (bad key, unverified sender): don't retry.
+                if 400 <= code < 500:
+                    raise RuntimeError(
+                        f"{self._config.http_provider} rejected the email "
+                        f"(HTTP {code}): {body[:300]}"
+                    )
+                raise ConnectionError(f"HTTP {code} from provider: {body[:200]}")
+            return resp
+
+        try:
+            retry_on_transient(
+                _do_post,
+                transient=(ConnectionError, OSError),
+                description=f"{self._config.http_provider} send",
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"{self._config.http_provider} send failed: {e}"
+            ) from e
+
+
+def _build_http_request(
+    provider: str, api_key: str, *,
+    sender: str, to: str, subject: str, body_text: str, body_html: str | None,
+) -> tuple[str, dict, dict]:
+    """Return (url, headers, json_payload) for the provider's send endpoint."""
+    headers = {"Authorization": f"Bearer {api_key}",
+               "Content-Type": "application/json"}
+    if provider == "resend":
+        payload: dict = {
+            "from": sender, "to": [to], "subject": subject, "text": body_text,
+        }
+        if body_html is not None:
+            payload["html"] = body_html
+        return "https://api.resend.com/emails", headers, payload
+    if provider == "sendgrid":
+        content = [{"type": "text/plain", "value": body_text}]
+        if body_html is not None:
+            content.append({"type": "text/html", "value": body_html})
+        payload = {
+            "personalizations": [{"to": [{"email": to}]}],
+            "from": {"email": sender},
+            "subject": subject,
+            "content": content,
+        }
+        return "https://api.sendgrid.com/v3/mail/send", headers, payload
+    raise RuntimeError(f"unknown HTTPS email provider: {provider!r}")
