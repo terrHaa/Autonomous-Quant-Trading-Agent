@@ -18,14 +18,15 @@ This gate is the defense, same philosophy as the bar-freshness guard
   drifts). Compare to the live ledger. Any per-symbol qty mismatch is a
   desync.
 
-  gate_positions(): called by run_daily_trade before planning. On
-  mismatch → REFUSE to trade (fail-closed: trading on poison mints real
-  damage; skipping a day costs ~nothing). launchd KeepAlive keeps
-  retrying through the trade window, so if the desync heals intraday the
-  trade proceeds on a later attempt automatically. On infrastructure
-  error (can't fetch orders) → fail-open with a warning, consistent with
-  the kill-switch check: a network blip must not block trading, and
-  without fills we can't compute a verdict anyway.
+  gate_positions(): called by run_daily_trade before planning. ADVISORY /
+  LOG-ONLY — it NEVER halts trading (T-incident 2026-07-16: as a
+  fail-closed gate it deadlocked the pipeline for a week — see
+  _classify_severity). It detects and loudly logs a desync for
+  observability, but always lets the trade proceed so the executor's
+  short auto-cover + stop-cancel (the REAL July-7 protection) can run and
+  self-heal. The fill-reconstruction it relies on is itself unreliable
+  (misses stop fills between runs), which is another reason it must not be
+  trusted to block.
 """
 
 from __future__ import annotations
@@ -184,19 +185,27 @@ def gate_positions(
     return _classify_severity(recon)
 
 
-# A halt is only justified for the DANGEROUS signature — not any mismatch.
-# T-incident 2026-07-15: the gate blocked ALL trading for days over a
-# 2-of-37 stray-share drift (GLW 2, WDC 1 — leftovers the reconstruction
-# missed exiting). Fill-reconstruction ALWAYS drifts by a few shares over
-# time (pagination limits, partial fills, corporate actions), so a
-# fail-closed-on-any-mismatch gate is guaranteed to eventually halt
-# everything. That did more damage than the July-7 desync it guards
-# against. Halt only when the mismatch looks like that real event:
-#   • a PHANTOM SHORT — the ledger shows a name short that we don't hold
-#     short (the dangerous case that mints naked sells), OR
-#   • a WHOLESALE desync — a large FRACTION of the book disagrees.
-# Everything else is minor drift: log it and TRADE; the daily audit's
-# reconciliation is the backstop that surfaces stragglers next morning.
+# The gate is ADVISORY (log-only) — it NEVER halts trading.
+#
+# T-incident 2026-07-16: as a fail-CLOSED gate it deadlocked the whole
+# pipeline for a week. GLW/WDC drifted short (a resting stop fired against a
+# 0 position); the gate saw "phantom short" and refused to trade — but the
+# refusal meant the run's stop-cancel + short-auto-cover steps never ran, so
+# the resting stops kept firing and the shorts persisted, so the gate kept
+# refusing. A guard that blocks the very cleanup that would clear its own
+# trigger is strictly harmful.
+#
+# The REAL protection against the July-7 desync lives in the executor and
+# runs every trade, independent of this gate:
+#   • short auto-cover (submit_daily_rebalance step 0c) buys-to-cover any
+#     short at the start of the run — the actual fix for phantom shorts;
+#   • stop-cancel-before-snapshot prevents minting new ones;
+#   • the daily audit reconciles and reports.
+# Plus the fill-reconstruction this gate relies on is itself unreliable (it
+# misses stop fills between runs), so it can't be trusted to HALT on.
+#
+# So: detect and LOUDLY LOG a desync (for observability + future alerting),
+# but always let the trade proceed so the executor can self-heal.
 _MATERIAL_FRACTION = 0.34
 
 
@@ -204,32 +213,33 @@ def _classify_severity(recon: PositionReconciliation) -> PositionReconciliation:
     if recon.ok or not recon.mismatches:
         return recon
     mm = recon.mismatches
-    phantom_shorts = {
-        s: (r, lq) for s, (r, lq) in mm.items() if lq < 0 <= r
-    }
+    phantom_shorts = sorted(s for s, (r, lq) in mm.items() if lq < 0 <= r)
     frac = len(mm) / recon.checked if recon.checked else 1.0
-    if phantom_shorts:
-        return PositionReconciliation(
-            ok=False,
-            reason=f"phantom short(s) in ledger: {sorted(phantom_shorts)}",
-            mismatches=mm, checked=recon.checked,
-        )
-    if frac > _MATERIAL_FRACTION:
-        return PositionReconciliation(
-            ok=False,
-            reason=f"wholesale desync — {len(mm)}/{recon.checked} names "
-                   f"({frac:.0%}) disagree",
-            mismatches=mm, checked=recon.checked,
-        )
-    # Minor drift — trade anyway; the daily audit will surface stragglers.
-    logger.warning(
-        "position gate: minor drift (%d/%d names: %s) — trading; "
-        "daily audit will reconcile.",
-        len(mm), recon.checked,
-        ", ".join(f"{s}(exp {r}/led {lq})" for s, (r, lq) in sorted(mm.items())),
+    detail = ", ".join(
+        f"{s}(exp {r}/led {lq})" for s, (r, lq) in sorted(mm.items())
     )
+    if phantom_shorts or frac > _MATERIAL_FRACTION:
+        # Loud, but do NOT halt — the executor auto-covers shorts and the
+        # audit backstops. Halting only deadlocks the self-healing.
+        logger.error(
+            "position gate: desync detected (%d/%d names; shorts=%s) — "
+            "TRADING ANYWAY so the executor can auto-cover/clean up. "
+            "Details: %s",
+            len(mm), recon.checked, phantom_shorts or "none", detail,
+        )
+        reason = (
+            f"desync ({len(mm)}/{recon.checked}; shorts={phantom_shorts}) "
+            "— traded (executor self-heals)"
+        )
+    else:
+        logger.warning(
+            "position gate: minor drift (%d/%d names: %s) — trading; "
+            "daily audit will reconcile.",
+            len(mm), recon.checked, detail,
+        )
+        reason = f"minor drift on {len(mm)}/{recon.checked} names — traded"
     return PositionReconciliation(
         ok=True,
-        reason=f"minor drift on {len(mm)}/{recon.checked} names — traded",
+        reason=reason,
         mismatches=mm, checked=recon.checked,
     )

@@ -76,7 +76,7 @@ def test_gate_fails_open_on_infrastructure_error(tmp_path) -> None:
     assert "failed open" in v.reason
 
 
-def test_gate_halts_on_phantom_short(tmp_path) -> None:
+def test_gate_flags_phantom_short_but_does_not_halt(tmp_path) -> None:
     """Ledger shows a name SHORT that we hold long → the dangerous July-7
     signature → halt."""
     prev = {"execution_report": {
@@ -86,11 +86,11 @@ def test_gate_halts_on_phantom_short(tmp_path) -> None:
     # Reconstruction expects long 5, ledger claims short -5.
     v = gate_positions(_FakeExec({"AMD": -5}, []), prev_run=prev,
                        override_path=tmp_path / "missing.json")
-    assert not v.ok
-    assert "phantom short" in v.reason
+    assert v.ok                       # advisory: never halts (executor auto-covers)
+    assert "AMD" in str(v.mismatches) and "shorts=['AMD']" in v.reason
 
 
-def test_gate_halts_on_wholesale_desync(tmp_path) -> None:
+def test_gate_flags_wholesale_desync_but_does_not_halt(tmp_path) -> None:
     """Most of the book disagrees → wholesale desync → halt."""
     baseline = {f"S{i}": 1 for i in range(10)}
     prev = {"execution_report": {
@@ -99,8 +99,8 @@ def test_gate_halts_on_wholesale_desync(tmp_path) -> None:
     ledger = {f"S{i}": 1 for i in range(3)}   # 7 of 10 vanished
     v = gate_positions(_FakeExec(ledger, []), prev_run=prev,
                        override_path=tmp_path / "missing.json")
-    assert not v.ok
-    assert "wholesale" in v.reason
+    assert v.ok                       # advisory: logs loudly but does not halt
+    assert "desync" in v.reason
 
 
 def test_gate_trades_through_minor_drift(tmp_path) -> None:
