@@ -766,49 +766,17 @@ def run_daily_trade(
                 type(e).__name__, e,
             )
 
-    # --- 0c. Position-feed sanity gate (T-incident 2026-07-07) ---
-    # The broker's positions ledger desynced from its own fill stream;
-    # trading on the lying feed minted phantom shorts and sold ghosts.
-    # Reconcile ledger vs (previous snapshot + fills since); on mismatch
-    # REFUSE to trade — KeepAlive retries through the window, so if the
-    # desync heals intraday the trade proceeds automatically. Fail-open
-    # only on infrastructure errors (same policy as the kill switch).
-    if not dry_run:
-        from quant.agent.position_gate import gate_positions
-        prev_run = None
-        try:
-            for back in range(1, 8):   # most recent record in the last week
-                prev_run = load_daily_run(
-                    today - timedelta(days=back), runs_dir=runs_dir,
-                )
-                if prev_run is not None:
-                    break
-        except Exception:
-            prev_run = None
-        verdict = gate_positions(executor, prev_run)
-        if not verdict.ok:
-            logger.error(
-                "POSITION-FEED DESYNC — refusing to trade today. %s",
-                verdict.summary(),
-            )
-            try:
-                EmailSender().send(
-                    subject=f"quant agent REFUSED to trade {today} — "
-                            "position-feed desync",
-                    body_text=(
-                        "The broker's positions ledger disagrees with its "
-                        "own fill stream (the 2026-07-07 Alpaca paper-engine "
-                        "desync pattern). Trading on a lying feed mints "
-                        "phantom orders, so today's run is a deliberate "
-                        "no-op. KeepAlive retries through the trade window; "
-                        "if the feed heals, the trade proceeds "
-                        "automatically.\n\n" + verdict.summary()
-                    ),
-                )
-            except Exception as mail_err:
-                logger.warning("gate refusal email failed: %s", mail_err)
-            return None
-        logger.info(verdict.summary())
+    # Position-feed desync protection lives in the EXECUTOR and the AUDIT,
+    # NOT a pre-trade gate. History (2026-07-07 → 07-16): a fill-
+    # reconstruction "gate" here was tried and removed — its reconstruction
+    # was unreliable (misses stop fills), it duplicated the daily audit's
+    # broker_reconciliation (which checks LIVE broker state, reliably), and
+    # as a fail-closed guard it deadlocked the pipeline for a week (refusing
+    # to trade blocked the very stop-cancel + short-auto-cover cleanup that
+    # would clear the shorts it tripped on). The real defenses run every
+    # trade regardless: submit_daily_rebalance auto-covers any short at run
+    # start and cancels resting stops before snapshotting; the daily audit
+    # reconciles and reports. No blocking gate.
 
     # --- 1. Fetch bars covering the longest signal window ---
     # SMA(50,200) needs the most history; budget 250 trading days + buffer

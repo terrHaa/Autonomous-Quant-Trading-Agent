@@ -74,6 +74,42 @@ Per EDGE_TAXONOMY.md, the genuine gaps buildable from OHLCV are: (1) volatility 
 _No strategy proposed this month._
 
 ---
+
+### 2026-07-02 — Monthly Review
+
+**Grid-search step**: Evaluated 8 candidates. No improvement found: no candidate beat current on BOTH Sharpe and max drawdown
+
+**Outcome**: `no_proposal`
+
+**Sandbox result**: (no proposal made)
+
+**Analysis**:
+
+This monthly review covers 18 trading days (2026-06-02 through 2026-07-02) with a -0.91% total return, annualized Sharpe of -1.69, and max drawdown of -2.58%. The portfolio has underperformed cash, with 11 losing days versus 6 winning days (35% win rate). The lag-1 autocorrelation of -0.37 indicates a mean-reverting daily return pattern—gains tend to follow losses and vice versa—which is consistent with the choppy, rotational regime observed in the weekly narratives.
+
+**Triangulating the three data sources reveals important disagreements:**
+
+1. The weekly narratives consistently credit individual semiconductor names (SNDK, INTC, MU, WDC) for performance, both positive and negative. However, the monthly statistical view's top-10 gainers shows CAT (+14.63%) and AMD (+6.03%) as the only meaningful movers, with CSCO appearing in both gainers AND losers at -3.54%—a clear data artifact suggesting the pre-computed metrics have a bug. The raw daily table tells the most coherent story: the portfolio rotated aggressively from GOOGL/GOOG/AMZN (June 2-3) to SNDK/INTC/STX (June 4 onwards), with SNDK dominating top-3 positions for 14 of 18 days. This concentration in storage semiconductors during a choppy tape explains the persistent small losses.
+
+2. The day-of-week breakdown shows Wednesday as the only profitable day (+0.55% mean, n=2), while Thursday was the worst (-0.15% mean, 20% win rate, n=5). This is NOT highlighted in any weekly narrative, which focused on single-name attribution. The Thursday pattern warrants attention: 5 observations with only 1 winner suggests either systematic execution timing issues or regime-specific weakness. The weekly narratives' focus on KLAC's -87.5% anomaly (flagged for data verification but never resolved) may have distracted from this calendar pattern.
+
+3. The weekly analyst escalated the mean reversion strategy's negative Sharpe four times across four weeks—this is the PRIMARY input requiring action. The Quant Diagnostics confirm: mean_reversion_5_200bp_vol20x1.5 has IC of -0.0265, IC t-stat of -0.48, and hit rate of only 38%. Critically, its regime_ic shows -0.039 in trend_up (current regime is trend_up_stormy) but +0.271 in trend_dn. This is exactly the regime-conditional performance documented in STRATEGY_LIBRARY.md: mean reversion fails in trending markets and works in range-bound/down markets. The candidate_regime_policy correctly suggests multiplier 0.0 for mean reversion in trend_up_stormy. This is not a broken strategy—it's a strategy being deployed in the wrong regime.
+
+**Pillar-by-pillar assessment:**
+
+**Pillar 1 (Signal Health):** SMA crossover shows IC decay (0.0622 early → 0.0329 recent, flagged decaying=true) but remains positive with 1.24 IC IR. xsec_momo is strengthening (0.0313 → 0.1608, decaying=false) with the best IC IR at 1.26 despite only 3.4% HRP weight—this is the book's highest-quality signal being severely underweighted. Mean reversion is negative but not decaying (improving from -0.0496 to -0.0033), suggesting it may recover as regime shifts.
+
+**Pillar 3 (Alpha vs Beta):** Attribution failed due to insufficient observations (0 common obs for 4-factor model). With only 17 daily returns, we cannot yet decompose alpha from factor exposure. The factor_premia show MOM (+46.5% ann, 1.61 Sharpe) crushing LOWVOL (-43.1% ann, -1.38 Sharpe)—this is a momentum-favorable environment, yet xsec_momo has only 3.4% weight while the negative-IC mean reversion sleeve has 20.4%. This is an allocation inefficiency.
+
+**Pillar 4 (Regime/Risk):** Current regime is trend_up_stormy with avg_pairwise_corr of 0.103 (low correlation, high dispersion). The candidate_regime_policy from the diagnostic is sensible: SMA crossover ×1.0, mean reversion ×0.0, xsec_momo ×0.902. Adopting this would zero out the bleeding mean reversion sleeve while preserving the two positive-IC strategies. Given mean reversion's regime_ic of -0.039 in trend_up versus +0.271 in trend_dn, this regime-gating is precisely the intervention the weekly analyst escalated.
+
+**Pillar 5 (Pipeline):** Implementation shortfall shows 78.2% entry fidelity—200 of 916 intended entries failed. Primary cause is 'other' (145 failures) with 'insufficient_qty' second (48). The reliability scorecard shows only 79.2% trade completion (5 missed days) and a concerning 4.0% audit pass rate (1/25 audits). This is a meaningful operational gap but falls under operator infrastructure, not strategy design.
+
+**Proposal**:
+
+_No strategy proposed this month._
+
+---
 <!-- ENTRIES_INSERTION_POINT — new entries appended above this comment by monthly_review.py -->
 
 _End of MEMORY.md_

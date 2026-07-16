@@ -459,7 +459,7 @@ def test_run_audit_email_failure_does_not_mask_audit(tmp_path: Path) -> None:
             raise RuntimeError("SMTP down")
 
     # Should NOT raise — email failures are logged, not propagated.
-    report = run_daily_audit(
+    run_daily_audit(
         for_date=today,
         runs_dir=runs_dir,
         audits_dir=tmp_path / "audits",
